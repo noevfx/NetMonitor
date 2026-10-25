@@ -132,7 +132,7 @@ A refatoração modularizou o código monolítico anterior em componentes coesos
 | Arquivo | Responsabilidade |
 | :--- | :--- |
 | `NetMonitor.cs` | Inicialização do app, hook de barra de tarefas, menu de contexto do widget, timers de amostragem de rede, flyout hover/click e ciclo de vida. |
-| `Settings.cs` | Modelos de dados (`AppSettings`), valores padrão, clonagem, persistência no Registro do Windows (`HKCU\Software\NetMonitor`). |
+| `Settings.cs` | Modelos de dados (`AppSettings`), valores padrão, clonagem, persistência no Registro do Windows (`HKCU\Software\NetMonitor`), 4 presets de cores assinados (`pure_mono`, `accent`, `ambar_ceu`, `aurora`), cálculo de contraste e tokens Ace Obsidian para tema claro e escuro. |
 | `Version.g.cs` | Definição estática da versão (`1.0.0`), assembly version e link de release. |
 | `Data.cs` | Coleta de métricas via `NetworkInterface` e inspeção de processos via `GetExtendedTcpTable` (com filtro de conexões locais e normalização). |
 | `WidgetRenderer.cs` | Desenho GDI+ de alto desempenho do widget (linhas de velocidade, setas, fontes tabulares, fundos acrílico/sólido). |
