@@ -1,4 +1,4 @@
-# ==============================================================================
+﻿# ==============================================================================
 # NetMonitor - Script de Instalação Oficial no Windows 11
 # ==============================================================================
 
@@ -10,7 +10,7 @@ $uninstallerBin = Join-Path $projectRoot "bin\uninstall.exe"
 
 if (-not (Test-Path $binExe) -or -not (Test-Path $uninstallerBin)) {
     Write-Host "Compilando binários mais recentes..." -ForegroundColor Cyan
-    & (Join-Path $projectRoot "build.ps1")
+    & (Join-Path $PSScriptRoot "build.ps1")
 }
 
 $installDir = Join-Path $env:LOCALAPPDATA "Programs\NetMonitor"
@@ -28,6 +28,9 @@ if (-not (Test-Path $installDir)) {
 Write-Host "Copiando arquivos para $installDir..." -ForegroundColor Cyan
 Copy-Item -Path $binExe -Destination $targetExe -Force
 Copy-Item -Path $uninstallerBin -Destination $targetUninstall -Force
+
+# Interface de configurações é nativa (WPF), embutida no NetMonitor.exe: não há mais settings.html.
+Remove-Item -Path (Join-Path $installDir "settings.html") -Force -ErrorAction SilentlyContinue
 
 # 1. Criar Atalho no Menu Iniciar
 $startMenuDir = Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs"
@@ -59,6 +62,48 @@ Write-Host "Registrado no Adicionar/Remover Programas do Windows." -ForegroundCo
 $runReg = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
 Set-ItemProperty -Path $runReg -Name "NetMonitor" -Value "`"$targetExe`""
 Write-Host "Configurado para iniciar com o Windows (Boot)." -ForegroundColor Green
+
+# 3.5 Definir Padrões de Fábrica no Registro (Posição travada, ancorada, Ace Obsidian, setas à esquerda, fundo transparente)
+
+$appReg = "HKCU:\Software\NetMonitor"
+
+if (-not (Test-Path $appReg)) {
+
+    New-Item -Path $appReg -Force | Out-Null
+
+}
+
+Set-ItemProperty -Path $appReg -Name "IsLocked" -Value 1 -Type DWord
+
+Set-ItemProperty -Path $appReg -Name "ArrowOnRight" -Value 0 -Type DWord
+
+Set-ItemProperty -Path $appReg -Name "SpeedUnitFormat" -Value "Bits"
+
+Set-ItemProperty -Path $appReg -Name "UnitMode" -Value "Auto"
+
+Set-ItemProperty -Path $appReg -Name "TextColorMode" -Value "Individual"
+
+Set-ItemProperty -Path $appReg -Name "TextColorUp" -Value "#0066FF"
+
+Set-ItemProperty -Path $appReg -Name "TextColorDown" -Value "#00E5FF"
+
+Set-ItemProperty -Path $appReg -Name "ArrowColorMode" -Value "Individual"
+
+Set-ItemProperty -Path $appReg -Name "ArrowColorUp" -Value "#0066FF"
+
+Set-ItemProperty -Path $appReg -Name "ArrowColorDown" -Value "#00E5FF"
+
+Set-ItemProperty -Path $appReg -Name "UnitColorMode" -Value "Inherit"
+
+Set-ItemProperty -Path $appReg -Name "WidgetBgMode" -Value "transparent"
+
+Set-ItemProperty -Path $appReg -Name "WidgetBorderEnabled" -Value 0 -Type DWord
+
+Remove-ItemProperty -Path $appReg -Name "CustomX" -ErrorAction SilentlyContinue
+
+Remove-ItemProperty -Path $appReg -Name "CustomY" -ErrorAction SilentlyContinue
+
+Write-Host "Padrões de fábrica calibrados (Ace Obsidian, 3 colunas, transparente)." -ForegroundColor Green
 
 # 4. Iniciar o programa
 try {

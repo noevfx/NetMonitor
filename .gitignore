@@ -1,6 +1,11 @@
-# Arquivos de design e marketing (PSDs pesados)
-Instagram - Carrossel/
+# Arquivos pesados de design e marketing (PSDs, AI, Manuais pesados)
+docs/design/Instagram - Carrossel/
+docs/design/Logomarca/
 
-# Arquivos temporários
+# Backups locais de versões e legados
+_backups/
+
+# Binários de compilação intermediários
+bin/
 *.tmp
 *.log

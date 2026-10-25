@@ -4,49 +4,27 @@ Todas as alterações notáveis deste projeto seguem o padrão de **Versionament
 
 ---
 
-## [1.0.0] - 2026-10-23
+## [1.0.0] - 2026-10-25 (Lançamento Oficial)
 
-### Adicionado
-- **Central de Configurações Moderna com Sidebar Lateral (Windows 11):**
-  - Nova interface gráfica estruturada em 4 páginas: **Geral**, **Tipografia**, **Cores** e **Ícones & Setas**.
-  - Painel de pré-visualização ao vivo (*live preview*) no rodapé, atualizando tipografia, cores, layout e setas em tempo real.
-  - Botões para salvar configurações, restaurar padrões de fábrica ou cancelar (com rollback instantâneo do estado prévio).
-- **Integração com ALT + TAB e Barra de Tarefas:**
-  - Janela de configurações com `WS_EX_APPWINDOW`, `ShowInTaskbar = true` e ícone oficial multi-resolução, permitindo alternar rapidamente via carrossel do Windows mesmo se encoberta por outras janelas.
-- **Card Flutuante (Flyout) do Top 5 Programas por Tráfego de Rede (Hover):**
-  - Acionado ao passar o mouse sobre o widget da barra de tarefas.
-  - Agrupamento inteligente por aplicativo/software (soma de tráfego de múltiplos subprocessos, abas e workers).
-  - Design moderno Windows 11 com cantos arredondados DWM (`DWMWCP_ROUND`), fundo fluente translúcido e sombra sutil.
-- **Tema Nativo do Windows 11 (Escuro / Claro Automático):**
-  - Menus e janelas sincronizados dinamicamente via `WM_SETTINGCHANGE` e `DwmSetWindowAttribute`.
-  - Renderização escura fluente (`#202020`), hover suave (`#323232`), checkmarks azuis (`#0078D4`) e bordas suaves.
-- **Suporte Bilingue Nativo (Português do Brasil / Inglês):**
-  - Submenu "Idioma" no menu de contexto do widget e seletor na página Geral das configurações.
-  - Persistência imediata no Registro do Windows (`HKCU\Software\NetMonitor`).
-- **Sistema Avançado de Cores e Tipografia:**
-  - Cores unificadas ou individuais para textos de velocidade (Upload / Download), unidades e setas.
-  - Paletas rápidas (*Branco Clássico*, *Verde/Vermelho*, *Ciano/Laranja*, *Azul Fluent*) e seletor `ColorDialog` nativo.
-  - Seleção de família da fonte (`Segoe UI Variable Display`, `Segoe UI`, `Cascadia Code`, `Consolas`, `Arial`), estilos e tamanhos proporcionais.
-- **Proteção e Privacidade:**
-  - Ocultação automática durante protetor de tela (incluindo tela cheia / botão "Visualizar" de `desk.cpl`) e tela de bloqueio.
-  - Instância única de processo garantida via `Mutex` nomeado global.
-- **Identidade Visual e Informações do Desenvolvedor:**
-  - Rodapé das configurações e menu de contexto com links clicáveis para **Noé VFX ([noevfx.com](https://noevfx.com))** e `contato@noevfx.com`.
-  - Ícone PE multi-resolução oficial embutido em todos os executáveis.
-
-### Corrigido
-- **Isolamento de Grupos de RadioButtons na UI:**
-  - Mini-painéis para isolar `pnlGrpText`, `pnlGrpUnit` e `pnlGrpArrow`, garantindo persistência da seleção de cores.
-- **Layout do Rodapé das Configurações:**
-  - Eliminação de qualquer sobreposição de texto sobre o botão "Redefinir Padrões" através de dimensões e bounds fixos.
-- **Protetor de Tela em Modo Janela / Preview:**
-  - Validação estrita de janela em tela cheia para evitar bloqueio falso no mini-preview de configuração do Windows.
-- **Invasão de Monitor Secundário:**
-  - Abertura de submenus sempre orientada à esquerda (`ToolStripDropDownDirection.Left`) e para cima da barra de tarefas.
-- **Corte de Caracteres na Unidade:**
-  - Ajuste de retângulo GDI+ com largura expandida e suavização ClearType.
-- **Isolamento de I/O de Disco e Filtro de Loopback no Top 5 Apps:**
-  - Correção de distorção onde gravações massivas em SSD/disco (ex: instaladores `Setup.exe` descompactando arquivos a ~175 MB/s) eram incorretamente exibidas como tráfego de rede de 1,4 Gbps.
-  - Filtro rigoroso nas tabelas TCP/UDP do Windows (`GetExtendedTcpTable`), considerando apenas conexões `ESTABLISHED` (state 5) para endereços IP externos reais e ignorando portas em escuta (`0.0.0.0`) e comunicação local/loopback (`127.0.0.1` e `::1`).
-  - Calibração e teto pela placa física: a taxa dos aplicativos do Top 5 agora é estritamente vinculada e normalizada pela velocidade real que trafega pela placa de rede física, eliminando qualquer leitura espúria de disco.
-
+### Destaques da Versão Final (Arquitetura WPF Nativa)
+- **Reescrita Completa da Interface em WPF Nativo (Sem HTML/WebView2):**
+  - Toda a Central de Configurações (`SettingsWindow.cs`) e o Instalador Oficial (`InstallerApp.cs`) foram recriados em XAML/WPF nativo puro com aceleração por hardware do Windows.
+  - Eliminação total de qualquer dependência de Chromium, WebView2 ou arquivos HTML embutidos em tempo de execução, garantindo inicialização instantânea (<100ms) e consumo mínimo de memória RAM (~12 MB).
+- **Flyout de Aplicativos em Tempo Real com Animação Bézier:**
+  - Painel suspenso suave renderizado via GDI+ com curva `cubic-bezier(0, 0, 0, 1)` de 280ms.
+  - Exibição em tempo real dos 5 processos com maior consumo de largura de banda, com divisão clara entre Download (RX) e Upload (TX).
+  - Suporte a fixação por clique ou expansão transitória ao passar o mouse (*hover*).
+- **Sistema de Cores Fluent 2 e Paletas Assinadas:**
+  - Inclusão de 6 paletas de cores calibradas para alto contraste e elegância: *Ace Obsidian*, *Dark Studio*, *Cyber Stream*, *Nordic Sage*, *Sunset Clay* e *Pure Slate*.
+  - Modo *Pure Mono* para setups minimalistas e monocromáticos.
+  - Controles finos de opacidade, intensidade e suporte dinâmico a tema Claro e Escuro sincronizado com o Windows.
+- **Tipografia e Indicadores de Tráfego:**
+  - Suporte a números tabulares (`tnum`) para que os dígitos de velocidade não causem tremor (*jitter*) na tela conforme a velocidade oscila.
+  - 6 famílias de indicadores vetoriais para Upload e Download: Triângulos clássicos, Linhas Finas, Outline, Chevrons modernos, Rótulos em texto (TX/RX) e Personalizado.
+  - Suporte completo a **Mbps (megabits por segundo)** e **MB/s (megabytes por segundo)** com escala automática inteligente.
+- **Instalador e Versão Portátil:**
+  - Novo assistente de instalação nativo (`NetMonitorSetup.exe`) com design escuro/claro, criação de atalhos e desinstalador limpo (`uninstall.exe`).
+  - Pacote portátil autossuficiente (`NetMonitor Portable\`) que roda sem instalação e sem privilégios de administrador.
+- **Arquitetura Modular em C# (.NET Framework 4.8):**
+  - Código-fonte desacoplado e modularizado em arquivos especializados: `NetMonitor.cs`, `Settings.cs`, `WidgetRenderer.cs`, `FlyoutRenderer.cs`, `Icons.cs`, `Data.cs`, `WpfKit.cs`, `SettingsWindow.cs`, `SettingsProcess.cs`, `Ipc.cs`, `InstallerApp.cs`, `Uninstaller.cs` e `Version.g.cs`.
+  - Fonte única da verdade para versionamento através de `version.txt` e `Version.g.cs`.

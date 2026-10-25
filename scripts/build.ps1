@@ -1,20 +1,31 @@
 # ==============================================================================
-# NetMonitor - Script de Build Automatizado (v1.0.0)
-# Gera sempre os pacotes organizados na pasta release\:
-#   1. NetMonitorSetup.exe (Instalador Oficial)
-#   2. NetMonitor Portable\ (Pasta da versão portátil)
-#   3. NetMonitor-Portable-v1.0.0.zip (Arquivo portátil avulso)
-#   4. NetMonitor-v1.0.0.zip (Pacote completo com instalador + portátil)
+# NetMonitor - Script de Build Automatizado
+# Gera os pacotes organizados na pasta release\:
+#   1. NetMonitorSetup.exe (Instalador nativo WPF)
+#   2. NetMonitor Portable\ (Pasta da versão portátil com README)
+#   3. NetMonitor-Portable-vX.Y.Z.zip (Arquivo portátil avulso com README)
+#   4. NetMonitor-vX.Y.Z.zip (Pacote completo com instalador + portátil + README)
 # ==============================================================================
 
 $ErrorActionPreference = "Stop"
 
 $projectRoot = Split-Path $PSScriptRoot -Parent
+$versionFile = Join-Path $projectRoot "version.txt"
+$version = if (Test-Path $versionFile) { (Get-Content $versionFile -Raw).Trim() } else { "1.0.0" }
+
 $csc = "C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe"
+$wpf = "C:\Windows\Microsoft.NET\Framework64\v4.0.30319\WPF"
 $srcDir = Join-Path $projectRoot "src"
+$resDir = Join-Path $srcDir "res"
 $binDir = Join-Path $projectRoot "bin"
 $releaseDir = Join-Path $projectRoot "release"
+$readmeFile = Join-Path $projectRoot "README.md"
 $iconPath = Join-Path $srcDir "app.ico"
+$wpfRefs = "System.dll,System.Core.dll,System.Drawing.dll,System.Windows.Forms.dll,PresentationCore.dll,PresentationFramework.dll,WindowsBase.dll,System.Xaml.dll"
+
+Write-Host "========================================================" -ForegroundColor Cyan
+Write-Host "Iniciando Build do NetMonitor v$version..." -ForegroundColor Cyan
+Write-Host "========================================================" -ForegroundColor Cyan
 
 # 1. Fechar processos em execução
 Get-Process NetMonitor, NetMonitorSetup -ErrorAction SilentlyContinue | Stop-Process -Force
@@ -22,93 +33,89 @@ Start-Sleep -Milliseconds 400
 
 # 2. Criar diretórios necessários
 foreach ($dir in @($binDir, $releaseDir)) {
-    if (-not (Test-Path $dir)) {
-        New-Item -ItemType Directory -Path $dir -Force | Out-Null
-    }
+    if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
 }
 
-# 3. Compilar NetMonitor.exe com ícone
-$netMonitorSrc = Join-Path $srcDir "NetMonitor.cs"
+# 3. Compilar NetMonitor.exe (widget + flyout + janela de configurações WPF)
 $netMonitorExe = Join-Path $binDir "NetMonitor.exe"
-
 Write-Host "1. Compilando NetMonitor.exe..." -ForegroundColor Cyan
-& $csc /nologo /target:winexe /optimize+ /platform:anycpu `
-    /win32icon:$iconPath `
-    /r:System.dll,System.Windows.Forms.dll,System.Drawing.dll,System.Core.dll `
-    /out:$netMonitorExe $netMonitorSrc
+& $csc /nologo /target:winexe /optimize+ /platform:anycpu /win32icon:$iconPath /lib:$wpf `
+    /r:$wpfRefs `
+    "/res:$resDir\icone_128.png,icone_128.png" "/res:$resDir\icone_256.png,icone_256.png" "/res:$resDir\pix_qrcode.png,pix_qrcode.png" `
+    /out:$netMonitorExe `
+    "$srcDir\NetMonitor.cs" "$srcDir\Settings.cs" "$srcDir\Version.g.cs" "$srcDir\Data.cs" "$srcDir\WidgetRenderer.cs" "$srcDir\FlyoutRenderer.cs" `
+    "$srcDir\Icons.cs" "$srcDir\WpfKit.cs" "$srcDir\SettingsWindow.cs" "$srcDir\SettingsProcess.cs" "$srcDir\Ipc.cs"
+if ($LASTEXITCODE -ne 0) { throw "Falha ao compilar NetMonitor.exe" }
 
-# 4. Compilar uninstall.exe com ícone
-$uninstallerSrc = Join-Path $srcDir "Uninstaller.cs"
+# 4. Compilar uninstall.exe
 $uninstallerExe = Join-Path $binDir "uninstall.exe"
-
 Write-Host "2. Compilando uninstall.exe..." -ForegroundColor Cyan
-& $csc /nologo /target:winexe /optimize+ /platform:anycpu `
-    /win32icon:$iconPath `
+& $csc /nologo /target:winexe /optimize+ /platform:anycpu /win32icon:$iconPath `
     /r:System.dll,System.Windows.Forms.dll,System.Drawing.dll `
-    /out:$uninstallerExe $uninstallerSrc
+    /out:$uninstallerExe "$srcDir\Uninstaller.cs"
+if ($LASTEXITCODE -ne 0) { throw "Falha ao compilar uninstall.exe" }
 
-# 5. Compilar o Instalador (NetMonitorSetup.exe)
-$installerSrc = Join-Path $srcDir "Installer.cs"
+# 5. Compilar o instalador nativo (NetMonitorSetup.exe)
 $installerExe = Join-Path $binDir "NetMonitorSetup.exe"
 $releaseSetup = Join-Path $releaseDir "NetMonitorSetup.exe"
-
 Write-Host "3. Compilando NetMonitorSetup.exe..." -ForegroundColor Cyan
-& $csc /nologo /target:winexe /optimize+ /platform:anycpu `
-    /win32icon:$iconPath `
-    /r:System.dll,System.Windows.Forms.dll,System.Drawing.dll,Microsoft.CSharp.dll `
-    /res:"$netMonitorExe,NetMonitor.exe" `
-    /res:"$uninstallerExe,uninstall.exe" `
-    /out:$installerExe $installerSrc
-
+& $csc /nologo /target:winexe /optimize+ /platform:anycpu /win32icon:$iconPath /lib:$wpf `
+    /r:$wpfRefs,Microsoft.CSharp.dll `
+    "/res:$netMonitorExe,NetMonitor.exe" "/res:$uninstallerExe,uninstall.exe" `
+    "/res:$resDir\icone_128.png,icone_128.png" "/res:$resDir\wordmark_branca.png,wordmark_branca.png" `
+    /out:$installerExe `
+    "$srcDir\InstallerApp.cs" "$srcDir\Settings.cs" "$srcDir\Version.g.cs" "$srcDir\Icons.cs" "$srcDir\WpfKit.cs"
+if ($LASTEXITCODE -ne 0) { throw "Falha ao compilar NetMonitorSetup.exe" }
 Copy-Item -Path $installerExe -Destination $releaseSetup -Force
 
-# 6. Gerar a Versão Portátil em release\
+# 6. Versão portátil com README
 Write-Host "4. Empacotando versão portátil em release\..." -ForegroundColor Cyan
 $portableDir = Join-Path $releaseDir "NetMonitor Portable"
-if (-not (Test-Path $portableDir)) { New-Item -ItemType Directory -Path $portableDir -Force | Out-Null }
+if (Test-Path $portableDir) { Remove-Item $portableDir -Recurse -Force }
+New-Item -ItemType Directory -Path $portableDir -Force | Out-Null
+Copy-Item -Path $netMonitorExe -Destination (Join-Path $portableDir "NetMonitor.exe") -Force
 
-$portableExe = Join-Path $portableDir "NetMonitor.exe"
-Copy-Item -Path $netMonitorExe -Destination $portableExe -Force
+if (Test-Path $readmeFile) {
+    Copy-Item -Path $readmeFile -Destination (Join-Path $portableDir "README.md") -Force
+}
 
-$portableReadme = Join-Path $portableDir "LEIA-ME.txt"
 $readmeContent = @"
 ==============================================================================
-NetMonitor v1.0.0 - NetMonitor Portable
-Autor: Eduardo Noé (eduardonoe)
+NetMonitor v$version - Versão Portátil
+Autor: Eduardo Noé (Noé VFX) - https://noevfx.com
 ==============================================================================
 
 [PT-BR]
-Esta é a versão portátil do NetMonitor.
-- Não requer instalação.
+Esta é a versão portátil oficial do NetMonitor.
+- Não requer instalação nem privilégios de administrador.
 - Pode ser executado diretamente de qualquer pasta ou pendrive.
 - Para usar, basta dar um duplo clique em NetMonitor.exe.
-- Para configurar idioma, placa de rede ou inicialização com o Windows, clique
-  com o botão direito sobre o widget na barra de tarefas.
+- Para abrir as Configurações, clique com o botão direito no widget e escolha 'Configurações...'.
 
 [EN]
-This is the portable version of NetMonitor.
-- No installation required.
+This is the official portable version of NetMonitor.
+- No installation or administrator privileges required.
 - Can be run directly from any folder or USB drive.
 - To use, simply double-click NetMonitor.exe.
-- To configure language, network adapter, or auto-start, right-click the
-  widget in the taskbar.
+- To open Settings, right-click the widget and choose 'Configurações... / Settings...'.
 ==============================================================================
 "@
-[System.IO.File]::WriteAllText($portableReadme, $readmeContent, [System.Text.Encoding]::UTF8)
+[System.IO.File]::WriteAllText((Join-Path $portableDir "LEIA-ME.txt"), $readmeContent, (New-Object System.Text.UTF8Encoding($true)))
 
-# Gerar NetMonitor-Portable-v1.0.0.zip
-$portableZip = Join-Path $releaseDir "NetMonitor-Portable-v1.0.0.zip"
+$portableZip = Join-Path $releaseDir "NetMonitor-Portable-v$version.zip"
 if (Test-Path $portableZip) { Remove-Item $portableZip -Force }
 Compress-Archive -Path "$portableDir\*" -DestinationPath $portableZip -Force
 
-# Gerar NetMonitor-v1.0.0.zip (Instalador + Portátil)
-$combinedZip = Join-Path $releaseDir "NetMonitor-v1.0.0.zip"
+# 7. Pacote completo (instalador + portátil + README)
+Write-Host "5. Criando pacote completo (NetMonitor-v$version.zip)..." -ForegroundColor Cyan
+$combinedZip = Join-Path $releaseDir "NetMonitor-v$version.zip"
 if (Test-Path $combinedZip) { Remove-Item $combinedZip -Force }
-
-# Usando .NET ZipFile para incluir o setup e a pasta portable
 [System.Reflection.Assembly]::LoadWithPartialName("System.IO.Compression.FileSystem") | Out-Null
 $zip = [System.IO.Compression.ZipFile]::Open($combinedZip, [System.IO.Compression.ZipArchiveMode]::Create)
 [System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile($zip, $releaseSetup, "NetMonitorSetup.exe") | Out-Null
+if (Test-Path $readmeFile) {
+    [System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile($zip, $readmeFile, "README.md") | Out-Null
+}
 Get-ChildItem -Path $portableDir -Recurse | ForEach-Object {
     if (-not $_.PSIsContainer) {
         $rel = "NetMonitor Portable\" + $_.FullName.Substring($portableDir.Length).TrimStart('\')
@@ -118,8 +125,8 @@ Get-ChildItem -Path $portableDir -Recurse | ForEach-Object {
 $zip.Dispose()
 
 Write-Host "`n========================================================" -ForegroundColor Green
-Write-Host "Build v1.0.0 Concluído e Organizado em release\!" -ForegroundColor Green
-Write-Host "  * Pacote Completo: $combinedZip" -ForegroundColor Yellow
+Write-Host "Build v$version concluído com sucesso em release\!" -ForegroundColor Green
+Write-Host "  * Pacote completo: $combinedZip" -ForegroundColor Yellow
 Write-Host "  * Instalador:      $releaseSetup" -ForegroundColor Yellow
 Write-Host "  * Portátil:        $portableZip" -ForegroundColor Yellow
-Write-Host "========================================================`n" -ForegroundColor Green
+Write-Host "========================================================" -ForegroundColor Green

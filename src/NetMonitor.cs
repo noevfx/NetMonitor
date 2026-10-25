@@ -1,19 +1,12 @@
-// ==============================================================================
+﻿// ==============================================================================
 // NetMonitor - Monitor de Rede Ultraleve para Barra de Tarefas (Windows 11)
 // Autor: Eduardo Noé (eduardonoe)
-// Version: 1.0.0
 //
-// v1.0.0 changelog:
-// - Top 5 Aplicativos com maior consumo de rede em tempo real no Mouse Hover (Flyout Fluente Windows 11).
-// - Reordenação dinâmica instantânea a cada segundo com identificação individual de subprocessos e abas.
-// - Multi-monitor e multi-resolução à prova de vazamento com clamping estrito de coordenadas e tratamento de WM_DISPLAYCHANGE.
-// - Atualização em Tempo Real (Live Tuning): todas as alterações refletem instantaneamente no widget.
-// - Arquitetura Proposta B: Sidebar lateral nativa Windows 11 com coordenadas absolutas e zero sobreposição.
-// - Troca de tema dinâmico em tempo real (Dark / Light) com o formulário de configurações aberto na tela.
-// - Auto-ocultação à prova de falhas em descanso de tela / screensaver (Toolhelp32 .scr nativo + SPI).
-// - Detecção automática do idioma nativo do sistema operacional (Português / Inglês).
-// - Colorização totalmente independente: Números, Unidades (Kbps/Mbps/MB/s) e Setas de Tráfego.
-// - Alternância entre medição em Bits (Mbps / Kbps / Gbps) e Bytes (MB/s / KB/s / GB/s), padrão Bits.
+// Arquitetura:
+// - Widget e flyout: janelas "layered" (UpdateLayeredWindow) desenhadas em GDI+ por WidgetRenderer/FlyoutRenderer.
+//   Fundo com alpha 1 mantém a área inteira clicável (menu de contexto e arraste em qualquer ponto do widget).
+// - Configurações: janela WPF nativa (SettingsWindow) numa thread própria, criada só quando aberta.
+// - Modelo único de configurações: AppSettings (registro HKCU\Software\NetMonitor).
 // ==============================================================================
 
 using System;
@@ -21,8 +14,9 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.Drawing;
 using System.Drawing.Drawing2D;
-using System.Drawing.Text;
+using System.Drawing.Imaging;
 using System.Globalization;
+using System.IO;
 using System.Net.NetworkInformation;
 using System.Reflection;
 using System.Runtime.InteropServices;
@@ -37,8 +31,7 @@ using Timer = System.Windows.Forms.Timer;
 [assembly: AssemblyCompany("Eduardo Noé")]
 [assembly: AssemblyProduct("NetMonitor")]
 [assembly: AssemblyCopyright("Copyright © 2026 Eduardo Noé")]
-[assembly: AssemblyVersion("1.0.0.0")]
-[assembly: AssemblyFileVersion("1.0.0.0")]
+// AssemblyVersion/AssemblyFileVersion vêm de src/Version.g.cs (gerado a partir de version.txt)
 
 namespace NetMonitor
 {
@@ -248,113 +241,72 @@ namespace NetMonitor
         private const string REG_KEY_RUN = @"Software\Microsoft\Windows\CurrentVersion\Run";
         private const string APP_NAME = "NetMonitor";
 
-        // Dimensões do Widget na Barra de Tarefas
-        private const int WIDGET_WIDTH = 106;
-        private const int WIDGET_HEIGHT = 38;
+        private const int WS_EX_LAYERED = 0x00080000;
+        private const int WM_DPICHANGED = 0x02E0;
+        private const string OPEN_SETTINGS_EVENT = "NetMonitor_OpenSettings_EduardoNoe";
 
-        // Paleta base do widget
-        public static readonly Color BG_COLOR_DARK = Color.FromArgb(28, 28, 28);
-        public static readonly Color BG_COLOR_LIGHT = Color.FromArgb(243, 243, 243);
-        private Color currentBgColor = Color.FromArgb(28, 28, 28);
-        private bool followSystemTheme = true;
-        private bool lastThemeIsDark = true;
+        // ---- Estado
+        private AppSettings S = new AppSettings();
+        private readonly object sLock = new object();
+        private volatile bool settingsOpen = false;
+        private volatile bool settingsSampling = false;
+        private IntPtr settingsHwnd = IntPtr.Zero;   // janela de Configurações (outro processo)
+        private Process settingsProc;
+        private bool lastSystemDark = true;
 
-        // Tipografia
-        private string fontFamily = "Segoe UI Variable Display";
-        private float fontSize = 9.5f;
-        private FontStyle fontStyle = FontStyle.Bold;
-        private Font fontNum;
-        private Font fontUnit;
-        private Font fontUnicode;
-
-        // Cores dos Números
-        private string textColorMode = "Unified";
-        private Color textColorUnified = Color.FromArgb(255, 255, 255);
-        private Color textColorUp = Color.FromArgb(255, 255, 255);
-        private Color textColorDown = Color.FromArgb(255, 255, 255);
-
-        // Cores das Unidades (Kbps / Mbps / MB/s)
-        private string unitColorMode = "Inherit";
-        private Color unitColorUnified = Color.FromArgb(190, 190, 190);
-        private Color unitColorUp = Color.FromArgb(190, 190, 190);
-        private Color unitColorDown = Color.FromArgb(190, 190, 190);
-
-        // Cores das Setas
-        private string arrowColorMode = "Unified";
-        private Color arrowColorUnified = Color.FromArgb(235, 235, 235);
-        private Color arrowColorUp = Color.FromArgb(235, 235, 235);
-        private Color arrowColorDown = Color.FromArgb(235, 235, 235);
-
-        // GDI+ Resource Cache (Zero alocação no OnPaint)
-        private SolidBrush brushNumUp;
-        private SolidBrush brushNumDown;
-        private SolidBrush brushUnitUp;
-        private SolidBrush brushUnitDown;
-        private SolidBrush brushArrowUp;
-        private SolidBrush brushArrowDown;
-        private Pen penArrowUp;
-        private Pen penArrowDown;
-
-        // Alinhamentos de texto reutilizáveis
-        private StringFormat sfRight;
-        private StringFormat sfLeft;
-        private StringFormat sfCenter;
-
-        // Configurações
-        private string selectedNicId = "Auto";
+        // compatibilidade com o código de placa de rede
+        private string selectedNicId { get { return S.Adapter; } set { S.Adapter = value; } }
+        private string currentLanguage { get { return S.Language; } }
         private string activeNicDisplayName = "Auto";
-        private string currentLanguage = "pt";
-        private string speedUnitFormat = "Bits";      // "Bits" ou "Bytes"
-        private string unitMode = "Auto";             // "Auto" ou fixa
-        private bool arrowOnRight = true;             // Seta à direita por padrão
-        private bool isLocked = false;                // Trava de posição
-        private bool hideOnScreensaver = true;        // Ocultar em screensaver / lock screen
-        private string iconTemplate = "VectorTriangle";
-        private string customUpChar = "▲";
-        private string customDownChar = "▼";
 
-        // Estado do Screensaver / Sessão
-        private bool isSessionLocked = false;
-        private bool isScreensaverRunning = false;
-        private bool isSettingsDialogOpen = false;
-
-        // Medição e Cache de Tráfego
+        // Medição
         private Timer updateTimer;
         private NetworkInterface cachedNic = null;
         private long lastBytesIn = -1;
         private long lastBytesOut = -1;
         private DateTime lastMeasurementTime = DateTime.MinValue;
-        private double latestPhysicalSpeedBytesPerSec = 0;
-
-        // Valores de exibição atuais
-        private string strUpNum = "0.0";
-        private string strUpUnit = "Kbps";
-        private string strDownNum = "0.0";
-        private string strDownUnit = "Kbps";
+        private double liveUpBits = 0, liveDownBits = 0;
+        private double physRxBytes = 0, physTxBytes = 0;
+        private string lastRenderKey = "";
+        private int curW = 106, curH = 38;
 
         // Componentes UI
         private ContextMenuStrip contextMenu;
         private NotifyIcon trayIcon;
 
-        // Hover Flyout (Top 5 Apps por Consumo de Rede em Tempo Real)
-        public bool showHoverFlyout = true;
-        private NetworkTopProcessesFlyout flyoutForm;
+        // Flyout (Top 5 apps)
+        private FlyoutForm flyout;
         private Timer hoverCheckTimer;
         private Timer processSampleTimer;
-        private bool isHoverSampling = false;
-        private Dictionary<int, ulong> lastProcessIo = new Dictionary<int, ulong>();
+        private volatile bool isHoverSampling = false;
+        private static volatile bool filterLoopback = true;
+        private struct IoSnap { public ulong R, W; }
+        private Dictionary<int, IoSnap> lastProcessIo = new Dictionary<int, IoSnap>();
         private Dictionary<int, string> cachedProcessNames = new Dictionary<int, string>();
+        private Dictionary<string, string> subCache = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        private DateTime lastSampleAt = DateTime.MinValue;
+        private readonly object topLock = new object();
+        private List<ProcessTrafficItem> latestTop = new List<ProcessTrafficItem>();
+
+        // Estado de tela
+        private bool isSessionLocked = false;
+        private bool isScreensaverRunning = false;
+
+        // Consumo do próprio app (painel de configurações)
+        private TimeSpan lastCpu = TimeSpan.Zero;
+        private DateTime lastCpuAt = DateTime.MinValue;
 
         public NetMonitorApp()
         {
+            S = AppSettings.Load(GetSystemDefaultLanguage());
+            filterLoopback = S.LoopbackFilter;
+            lastSystemDark = IsWindowsDarkTheme();
             InitializeComponent();
-            LoadSettings();
-            ApplySystemTheme();
-            SetupFonts();
-            UpdateCachedGdiResources();
+            IntPtr h = this.Handle;            // garante o handle antes do primeiro desenho
+            MeasureWidget();
+            PositionWidget();
             BuildContextMenu();
             SetupTimer();
-            PositionWidget();
             BindToTaskbarOwner();
 
             this.MouseEnter += OnWidgetMouseEnter;
@@ -364,9 +316,29 @@ namespace NetMonitor
             {
                 SystemEvents.UserPreferenceChanged += OnUserPreferenceChanged;
                 SystemEvents.SessionSwitch += OnSessionSwitch;
-                GC.Collect(2, GCCollectionMode.Optimized);
             }
             catch { }
+
+            StartOpenSettingsListener();
+            // Depois da inicialização, devolve ao Windows a memória temporária (working set) do .NET/GDI+.
+            Timer trim = new Timer { Interval = 6000 };
+            trim.Tick += delegate { trim.Stop(); trim.Dispose(); Mem.Trim(); };
+            trim.Start();
+            if (S.FlyoutPinned)
+            {
+                Timer t = new Timer { Interval = 800 };
+                t.Tick += delegate { t.Stop(); t.Dispose(); if (S.FlyoutPinned) ShowFlyout(); };
+                t.Start();
+            }
+        }
+
+        // ------------------------------------------------------------------ tema
+        private bool EffectiveDark { get { return S.IsDark(lastSystemDark); } }
+
+        private float GetDpi()
+        {
+            try { using (Graphics g = this.CreateGraphics()) return g.DpiX; }
+            catch { return 96f; }
         }
 
         private void OnSessionSwitch(object sender, SessionSwitchEventArgs e)
@@ -376,16 +348,15 @@ namespace NetMonitor
                 if (e.Reason == SessionSwitchReason.SessionLock)
                 {
                     isSessionLocked = true;
-                    if (hideOnScreensaver) this.Visible = false;
+                    if (S.HideOnScreensaver) { this.Visible = false; HideFlyout(true); }
                 }
                 else if (e.Reason == SessionSwitchReason.SessionUnlock)
                 {
                     isSessionLocked = false;
-                    if (hideOnScreensaver && !isScreensaverRunning)
+                    if (S.HideOnScreensaver && !isScreensaverRunning)
                     {
                         this.Visible = true;
                         PositionWidget();
-                        this.Invalidate();
                     }
                 }
             }
@@ -396,67 +367,63 @@ namespace NetMonitor
         {
             try
             {
-                if (this.IsHandleCreated)
-                {
-                    this.BeginInvoke((MethodInvoker)delegate
-                    {
-                        ApplySystemTheme();
-                    });
-                }
-                else
-                {
-                    ApplySystemTheme();
-                }
+                if (this.IsHandleCreated) this.BeginInvoke((MethodInvoker)delegate { ApplySystemTheme(); });
             }
             catch { }
+        }
+
+        private Timer themeRepaint;
+        private int themeRepaintStep;
+
+        private void ScheduleThemeRepaint()
+        {
+            if (themeRepaint == null)
+            {
+                themeRepaint = new Timer { Interval = 600 };
+                themeRepaint.Tick += delegate
+                {
+                    themeRepaintStep++;
+                    BindToTaskbarOwner();
+                    ApplySystemTheme();
+                    if (themeRepaintStep >= 2) themeRepaint.Stop(); else themeRepaint.Interval = 1200;
+                };
+            }
+            themeRepaintStep = 0;
+            themeRepaint.Interval = 600;
+            themeRepaint.Stop(); themeRepaint.Start();
         }
 
         public void ApplySystemTheme()
         {
             try
             {
-                bool isDark = IsWindowsDarkTheme();
-                lastThemeIsDark = isDark;
-                currentBgColor = isDark ? BG_COLOR_DARK : BG_COLOR_LIGHT;
-                this.BackColor = currentBgColor;
-
-                if (followSystemTheme)
-                {
-                    if (textColorMode == "Unified")
-                    {
-                        textColorUnified = isDark ? Color.FromArgb(255, 255, 255) : Color.FromArgb(20, 20, 20);
-                    }
-                    if (unitColorMode == "Inherit")
-                    {
-                        unitColorUnified = isDark ? Color.FromArgb(190, 190, 190) : Color.FromArgb(85, 85, 85);
-                    }
-                    if (arrowColorMode == "Unified")
-                    {
-                        arrowColorUnified = isDark ? Color.FromArgb(235, 235, 235) : Color.FromArgb(40, 40, 40);
-                    }
-                }
-
-                UpdateCachedGdiResources();
-                BuildContextMenu();
-                this.Invalidate();
+                lastSystemDark = IsWindowsDarkTheme();
+                RenderWidget();
+                if (flyout != null && flyout.Visible) UpdateFlyout();
             }
             catch { }
         }
 
+        // ------------------------------------------------------------------ janela
         protected override CreateParams CreateParams
         {
             get
             {
                 CreateParams cp = base.CreateParams;
                 cp.Style = WS_POPUP;
-                cp.ExStyle |= WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE;
+                cp.ExStyle |= WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE;
                 return cp;
             }
         }
 
-        protected override bool ShowWithoutActivation
+        protected override bool ShowWithoutActivation { get { return true; } }
+        protected override void OnPaintBackground(PaintEventArgs e) { }
+        protected override void OnPaint(PaintEventArgs e) { }
+
+        protected override void OnVisibleChanged(EventArgs e)
         {
-            get { return true; }
+            base.OnVisibleChanged(e);
+            if (this.Visible) RenderWidget();
         }
 
         private void InitializeComponent()
@@ -465,9 +432,7 @@ namespace NetMonitor
             this.ShowInTaskbar = false;
             this.TopMost = true;
             this.StartPosition = FormStartPosition.Manual;
-            this.Size = new Size(WIDGET_WIDTH, WIDGET_HEIGHT);
-            this.BackColor = currentBgColor;
-            this.DoubleBuffered = true;
+            this.Size = new Size(curW, curH);
             this.Text = "NetMonitor";
 
             this.trayIcon = new NotifyIcon();
@@ -477,18 +442,62 @@ namespace NetMonitor
                 this.Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath);
                 this.trayIcon.Icon = this.Icon;
             }
-            catch
-            {
-                this.trayIcon.Icon = SystemIcons.Application;
-            }
+            catch { this.trayIcon.Icon = SystemIcons.Application; }
             this.trayIcon.Visible = true;
+            this.trayIcon.DoubleClick += (s, e) => OpenSettingsDialog("cores");
+            this.DoubleClick += (s, e) => OpenSettingsDialog("cores");
 
             this.MouseDown += NetMonitorApp_MouseDown;
             this.MouseUp += NetMonitorApp_MouseUp;
-
-            SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint | ControlStyles.OptimizedDoubleBuffer, true);
         }
 
+        // ------------------------------------------------------------------ desenho
+        private Bitmap MakeBitmap()
+        {
+            string un, uu, dn, du;
+            SpeedFmt.Format(S, liveUpBits, true, out un, out uu);
+            SpeedFmt.Format(S, liveDownBits, false, out dn, out du);
+            return WidgetRenderer.Render(S, EffectiveDark, un, uu, dn, du, GetDpi());
+        }
+
+        private void MeasureWidget()
+        {
+            using (Bitmap b = MakeBitmap()) { curW = b.Width; curH = b.Height; }
+        }
+
+        // Redesenha o widget. Se o tamanho mudou, mantém a borda direita e o centro vertical no lugar.
+        public void RenderWidget()
+        {
+            if (!this.IsHandleCreated) return;
+            try
+            {
+                using (Bitmap bmp = MakeBitmap())
+                {
+                    int x = this.Left, y = this.Top;
+                    if (bmp.Width != curW || bmp.Height != curH)
+                    {
+                        int oldW = curW, oldH = curH;
+                        curW = bmp.Width; curH = bmp.Height;
+                        if (!customPos) { Point a = AutoAnchor(); x = a.X; y = a.Y; }
+                        else { x += oldW - curW; y += (oldH - curH) / 2; }
+                    }
+                    LayeredWindow.Present(this.Handle, bmp, x, y, 255);
+                    this.Location = new Point(x, y);
+                }
+                lastRenderKey = RenderKey();
+            }
+            catch { }
+        }
+
+        private string RenderKey()
+        {
+            string un, uu, dn, du;
+            SpeedFmt.Format(S, liveUpBits, true, out un, out uu);
+            SpeedFmt.Format(S, liveDownBits, false, out dn, out du);
+            return un + uu + dn + du;
+        }
+
+        // ------------------------------------------------------------------ utilidades
         public static string ColorToHex(Color c)
         {
             return string.Format("#{0:X2}{1:X2}{2:X2}", c.R, c.G, c.B);
@@ -647,573 +656,6 @@ namespace NetMonitor
             return false;
         }
 
-        private void SetupFonts()
-        {
-            if (fontNum != null) fontNum.Dispose();
-            if (fontUnit != null) fontUnit.Dispose();
-            if (fontUnicode != null) fontUnicode.Dispose();
-
-            string targetFamily = fontFamily;
-            if (!IsFontInstalled(targetFamily))
-            {
-                targetFamily = "Segoe UI";
-            }
-
-            try
-            {
-                fontNum = new Font(targetFamily, fontSize, fontStyle);
-            }
-            catch
-            {
-                fontNum = new Font("Segoe UI", 9.5f, FontStyle.Bold);
-            }
-
-            try
-            {
-                float unitSize = Math.Max(7.0f, fontSize - 1.5f);
-                fontUnit = new Font(targetFamily, unitSize, FontStyle.Regular);
-            }
-            catch
-            {
-                fontUnit = new Font("Segoe UI", 8.0f, FontStyle.Regular);
-            }
-
-            float uniSize = Math.Max(7.5f, fontSize - 1.0f);
-            fontUnicode = new Font("Segoe UI Symbol", uniSize, FontStyle.Regular);
-
-            if (sfRight == null)
-            {
-                sfRight = new StringFormat
-                {
-                    Alignment = StringAlignment.Far,
-                    LineAlignment = StringAlignment.Center
-                };
-                sfLeft = new StringFormat
-                {
-                    Alignment = StringAlignment.Near,
-                    LineAlignment = StringAlignment.Center
-                };
-                sfCenter = new StringFormat
-                {
-                    Alignment = StringAlignment.Center,
-                    LineAlignment = StringAlignment.Center
-                };
-            }
-        }
-
-        public static bool IsFontInstalled(string familyName)
-        {
-            try
-            {
-                using (InstalledFontCollection fonts = new InstalledFontCollection())
-                {
-                    foreach (var f in fonts.Families)
-                    {
-                        if (string.Equals(f.Name, familyName, StringComparison.OrdinalIgnoreCase))
-                            return true;
-                    }
-                }
-            }
-            catch { }
-            return false;
-        }
-
-        private Color EnsureLegibleContrast(Color c, Color bg)
-        {
-            double lumC = 0.299 * c.R + 0.587 * c.G + 0.114 * c.B;
-            double lumBg = 0.299 * bg.R + 0.587 * bg.G + 0.114 * bg.B;
-
-            if (lumBg < 128 && lumC < 90)
-            {
-                return Color.FromArgb(245, 245, 245);
-            }
-            if (lumBg >= 128 && lumC > 175)
-            {
-                return Color.FromArgb(25, 25, 25);
-            }
-            return c;
-        }
-
-        private void UpdateCachedGdiResources()
-        {
-            if (brushNumUp != null) brushNumUp.Dispose();
-            if (brushNumDown != null) brushNumDown.Dispose();
-            if (brushUnitUp != null) brushUnitUp.Dispose();
-            if (brushUnitDown != null) brushUnitDown.Dispose();
-            if (brushArrowUp != null) brushArrowUp.Dispose();
-            if (brushArrowDown != null) brushArrowDown.Dispose();
-            if (penArrowUp != null) penArrowUp.Dispose();
-            if (penArrowDown != null) penArrowDown.Dispose();
-
-            Color cNumUp = (textColorMode == "Individual") ? textColorUp : textColorUnified;
-            Color cNumDown = (textColorMode == "Individual") ? textColorDown : textColorUnified;
-
-            Color cUnitUp;
-            Color cUnitDown;
-            if (unitColorMode == "Individual")
-            {
-                cUnitUp = unitColorUp;
-                cUnitDown = unitColorDown;
-            }
-            else if (unitColorMode == "Unified")
-            {
-                cUnitUp = unitColorUnified;
-                cUnitDown = unitColorUnified;
-            }
-            else // Inherit
-            {
-                if (IsWindowsDarkTheme())
-                {
-                    cUnitUp = Color.FromArgb((int)(cNumUp.R * 0.85f), (int)(cNumUp.G * 0.85f), (int)(cNumUp.B * 0.85f));
-                    cUnitDown = Color.FromArgb((int)(cNumDown.R * 0.85f), (int)(cNumDown.G * 0.85f), (int)(cNumDown.B * 0.85f));
-                }
-                else
-                {
-                    cUnitUp = Color.FromArgb(Math.Min(255, (int)(cNumUp.R + 45)), Math.Min(255, (int)(cNumUp.G + 45)), Math.Min(255, (int)(cNumUp.B + 45)));
-                    cUnitDown = Color.FromArgb(Math.Min(255, (int)(cNumDown.R + 45)), Math.Min(255, (int)(cNumDown.G + 45)), Math.Min(255, (int)(cNumDown.B + 45)));
-                }
-            }
-
-            Color cArrUp = (arrowColorMode == "Individual") ? arrowColorUp : arrowColorUnified;
-            Color cArrDown = (arrowColorMode == "Individual") ? arrowColorDown : arrowColorUnified;
-
-            cNumUp = EnsureLegibleContrast(cNumUp, currentBgColor);
-            cNumDown = EnsureLegibleContrast(cNumDown, currentBgColor);
-            cUnitUp = EnsureLegibleContrast(cUnitUp, currentBgColor);
-            cUnitDown = EnsureLegibleContrast(cUnitDown, currentBgColor);
-            cArrUp = EnsureLegibleContrast(cArrUp, currentBgColor);
-            cArrDown = EnsureLegibleContrast(cArrDown, currentBgColor);
-
-            brushNumUp = new SolidBrush(cNumUp);
-            brushNumDown = new SolidBrush(cNumDown);
-            brushUnitUp = new SolidBrush(cUnitUp);
-            brushUnitDown = new SolidBrush(cUnitDown);
-            brushArrowUp = new SolidBrush(cArrUp);
-            brushArrowDown = new SolidBrush(cArrDown);
-            penArrowUp = new Pen(cArrUp, 1.4f);
-            penArrowDown = new Pen(cArrDown, 1.4f);
-        }
-
-        private void SetupTimer()
-        {
-            int tickCount = 0;
-            updateTimer = new Timer();
-            updateTimer.Interval = 300;
-            updateTimer.Tick += (s, e) =>
-            {
-                // Proteção contra descanso de tela / screensaver
-                if (hideOnScreensaver)
-                {
-                    bool ss = IsAnyScreensaverActive();
-                    if (ss || isSessionLocked)
-                    {
-                        if (!isScreensaverRunning || this.Visible)
-                        {
-                            isScreensaverRunning = true;
-                            this.Visible = false;
-                            SetWindowPos(this.Handle, IntPtr.Zero, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_HIDEWINDOW);
-                            if (flyoutForm != null && flyoutForm.Visible)
-                            {
-                                flyoutForm.Hide();
-                            }
-                        }
-                        return; // Não executa SetWindowPos de exibição nem UpdateTraffic enquanto em descanso!
-                    }
-                    else
-                    {
-                        if (isScreensaverRunning || !this.Visible)
-                        {
-                            isScreensaverRunning = false;
-                            this.Visible = true;
-                            PositionWidget();
-                            this.Invalidate();
-                        }
-                    }
-                }
-
-                tickCount++;
-                if (tickCount >= 3)
-                {
-                    tickCount = 0;
-                    UpdateTraffic();
-
-                    bool isDarkNow = IsWindowsDarkTheme();
-                    if (isDarkNow != lastThemeIsDark)
-                    {
-                        ApplySystemTheme();
-                    }
-                }
-
-                if (this.Visible && !isSettingsDialogOpen && !isScreensaverRunning && !isSessionLocked)
-                {
-                    SetWindowPos(this.Handle, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
-                }
-            };
-            updateTimer.Start();
-            UpdateTraffic();
-        }
-
-        private void BindToTaskbarOwner()
-        {
-            try
-            {
-                IntPtr trayWnd = FindWindow("Shell_TrayWnd", null);
-                if (trayWnd != IntPtr.Zero)
-                {
-                    SetWindowLongPtr(this.Handle, GWLP_HWNDPARENT, trayWnd);
-                }
-            }
-            catch { }
-        }
-
-        protected override void WndProc(ref Message m)
-        {
-            const int WM_SETTINGCHANGE = 0x001A;
-            const int WM_THEMECHANGED = 0x031A;
-            if (m.Msg == WM_SETTINGCHANGE || m.Msg == WM_THEMECHANGED)
-            {
-                ApplySystemTheme();
-            }
-
-            if (m.Msg == WM_DISPLAYCHANGE)
-            {
-                // Multi-monitor: re-posiciona e recalibra limites se a resolução ou disposição de telas mudar
-                PositionWidget(false);
-                if (flyoutForm != null && flyoutForm.Visible)
-                {
-                    PositionFlyout();
-                }
-            }
-
-            if (m.Msg == WM_WINDOWPOSCHANGING)
-            {
-                if (hideOnScreensaver && isScreensaverRunning)
-                {
-                    // Não força HWND_TOPMOST se screensaver estiver ativo
-                }
-                else if (this.Visible && !isScreensaverRunning && !isSessionLocked)
-                {
-                    WINDOWPOS pos = (WINDOWPOS)Marshal.PtrToStructure(m.LParam, typeof(WINDOWPOS));
-                    pos.hwndInsertAfter = HWND_TOPMOST;
-                    Marshal.StructureToPtr(pos, m.LParam, false);
-                }
-            }
-            base.WndProc(ref m);
-        }
-
-        public void LoadSettings()
-        {
-            try
-            {
-                using (RegistryKey key = Registry.CurrentUser.OpenSubKey(REG_KEY_APP))
-                {
-                    if (key != null)
-                    {
-                        object valNic = key.GetValue("SelectedAdapter");
-                        if (valNic != null) selectedNicId = valNic.ToString();
-
-                        object valLang = key.GetValue("Language");
-                        if (valLang != null) currentLanguage = valLang.ToString();
-                        else currentLanguage = GetSystemDefaultLanguage();
-
-                        object valFormat = key.GetValue("SpeedUnitFormat");
-                        if (valFormat != null) speedUnitFormat = valFormat.ToString();
-                        else speedUnitFormat = "Bits";
-
-                        object valUnit = key.GetValue("UnitMode");
-                        if (valUnit != null) unitMode = valUnit.ToString();
-
-                        object valArrow = key.GetValue("ArrowOnRight");
-                        if (valArrow != null) arrowOnRight = Convert.ToInt32(valArrow) == 1;
-
-                        object valLock = key.GetValue("IsLocked");
-                        if (valLock != null) isLocked = Convert.ToInt32(valLock) == 1;
-
-                        object valSs = key.GetValue("HideOnScreensaver");
-                        if (valSs != null) hideOnScreensaver = Convert.ToInt32(valSs) == 1;
-                        else hideOnScreensaver = true;
-
-                        object valFollow = key.GetValue("FollowSystemTheme");
-                        if (valFollow != null) followSystemTheme = Convert.ToInt32(valFollow) == 1;
-                        else followSystemTheme = true;
-
-                        object valHover = key.GetValue("ShowHoverFlyout");
-                        if (valHover != null) showHoverFlyout = Convert.ToInt32(valHover) == 1;
-                        else showHoverFlyout = true;
-
-                        object valTpl = key.GetValue("IconTemplate");
-                        if (valTpl != null) iconTemplate = valTpl.ToString();
-
-                        object valUp = key.GetValue("CustomUpChar");
-                        if (valUp != null) customUpChar = valUp.ToString();
-
-                        object valDown = key.GetValue("CustomDownChar");
-                        if (valDown != null) customDownChar = valDown.ToString();
-
-                        object valFontF = key.GetValue("FontFamily");
-                        if (valFontF != null) fontFamily = valFontF.ToString();
-                        else fontFamily = "Segoe UI Variable Display";
-
-                        object valFontS = key.GetValue("FontSize");
-                        if (valFontS != null) float.TryParse(valFontS.ToString(), NumberStyles.Float, CultureInfo.InvariantCulture, out fontSize);
-                        else fontSize = 9.5f;
-
-                        object valFontSt = key.GetValue("FontStyle");
-                        if (valFontSt != null) fontStyle = (FontStyle)Convert.ToInt32(valFontSt);
-                        else fontStyle = FontStyle.Bold;
-
-                        // Cores dos Números
-                        object valTm = key.GetValue("TextColorMode");
-                        if (valTm != null) textColorMode = valTm.ToString();
-                        textColorUnified = HexToColor(key.GetValue("TextColorUnified") as string, Color.FromArgb(255, 255, 255));
-                        textColorUp = HexToColor(key.GetValue("TextColorUp") as string, Color.FromArgb(255, 255, 255));
-                        textColorDown = HexToColor(key.GetValue("TextColorDown") as string, Color.FromArgb(255, 255, 255));
-
-                        // Cores das Unidades
-                        object valUm = key.GetValue("UnitColorMode");
-                        if (valUm != null) unitColorMode = valUm.ToString();
-                        else unitColorMode = "Inherit";
-                        unitColorUnified = HexToColor(key.GetValue("UnitColorUnified") as string, Color.FromArgb(190, 190, 190));
-                        unitColorUp = HexToColor(key.GetValue("UnitColorUp") as string, Color.FromArgb(190, 190, 190));
-                        unitColorDown = HexToColor(key.GetValue("UnitColorDown") as string, Color.FromArgb(190, 190, 190));
-
-                        // Cores das Setas
-                        object valAm = key.GetValue("ArrowColorMode");
-                        if (valAm != null) arrowColorMode = valAm.ToString();
-                        arrowColorUnified = HexToColor(key.GetValue("ArrowColorUnified") as string, Color.FromArgb(235, 235, 235));
-                        arrowColorUp = HexToColor(key.GetValue("ArrowColorUp") as string, Color.FromArgb(235, 235, 235));
-                        arrowColorDown = HexToColor(key.GetValue("ArrowColorDown") as string, Color.FromArgb(235, 235, 235));
-                    }
-                    else
-                    {
-                        currentLanguage = GetSystemDefaultLanguage();
-                    }
-                }
-            }
-            catch { }
-        }
-
-        public void SaveSettings()
-        {
-            try
-            {
-                using (RegistryKey key = Registry.CurrentUser.CreateSubKey(REG_KEY_APP))
-                {
-                    if (key != null)
-                    {
-                        key.SetValue("SelectedAdapter", selectedNicId);
-                        key.SetValue("Language", currentLanguage);
-                        key.SetValue("SpeedUnitFormat", speedUnitFormat);
-                        key.SetValue("UnitMode", unitMode);
-                        key.SetValue("ArrowOnRight", arrowOnRight ? 1 : 0);
-                        key.SetValue("IsLocked", isLocked ? 1 : 0);
-                        key.SetValue("HideOnScreensaver", hideOnScreensaver ? 1 : 0);
-                        key.SetValue("FollowSystemTheme", followSystemTheme ? 1 : 0);
-                        key.SetValue("ShowHoverFlyout", showHoverFlyout ? 1 : 0);
-                        key.SetValue("CustomX", this.Location.X);
-                        key.SetValue("CustomY", this.Location.Y);
-
-                        key.SetValue("FontFamily", fontFamily);
-                        key.SetValue("FontSize", fontSize.ToString(CultureInfo.InvariantCulture));
-                        key.SetValue("FontStyle", (int)fontStyle);
-
-                        key.SetValue("TextColorMode", textColorMode);
-                        key.SetValue("TextColorUnified", ColorToHex(textColorUnified));
-                        key.SetValue("TextColorUp", ColorToHex(textColorUp));
-                        key.SetValue("TextColorDown", ColorToHex(textColorDown));
-
-                        key.SetValue("UnitColorMode", unitColorMode);
-                        key.SetValue("UnitColorUnified", ColorToHex(unitColorUnified));
-                        key.SetValue("UnitColorUp", ColorToHex(unitColorUp));
-                        key.SetValue("UnitColorDown", ColorToHex(unitColorDown));
-
-                        key.SetValue("ArrowColorMode", arrowColorMode);
-                        key.SetValue("ArrowColorUnified", ColorToHex(arrowColorUnified));
-                        key.SetValue("ArrowColorUp", ColorToHex(arrowColorUp));
-                        key.SetValue("ArrowColorDown", ColorToHex(arrowColorDown));
-
-                        key.SetValue("IconTemplate", iconTemplate);
-                        key.SetValue("CustomUpChar", customUpChar);
-                        key.SetValue("CustomDownChar", customDownChar);
-                    }
-                }
-            }
-            catch { }
-        }
-
-        // Método de Live Tuning: reflete alterações na barra de tarefas em tempo real
-        public void ApplyLiveTuning(
-            string lang,
-            string speedFormat,
-            string unit,
-            bool arrowRight,
-            bool locked,
-            bool hideScreensaver,
-            bool showHover,
-            string tpl,
-            string upChar,
-            string downChar,
-            string fontFam,
-            float fontSz,
-            FontStyle fontSt,
-            string txtColMode,
-            Color txtColUni,
-            Color txtColUp,
-            Color txtColDn,
-            string unitColMode,
-            Color unitColUni,
-            Color unitColUp,
-            Color unitColDn,
-            string arrColMode,
-            Color arrColUni,
-            Color arrColUp,
-            Color arrColDn)
-        {
-            this.currentLanguage = lang;
-            this.speedUnitFormat = speedFormat;
-            this.unitMode = unit;
-            this.arrowOnRight = arrowRight;
-            this.isLocked = locked;
-            this.hideOnScreensaver = hideScreensaver;
-            this.showHoverFlyout = showHover;
-            this.iconTemplate = tpl;
-            this.customUpChar = upChar;
-            this.customDownChar = downChar;
-
-            this.fontFamily = fontFam;
-            this.fontSize = fontSz;
-            this.fontStyle = fontSt;
-
-            this.textColorMode = txtColMode;
-            this.textColorUnified = txtColUni;
-            this.textColorUp = txtColUp;
-            this.textColorDown = txtColDn;
-
-            this.unitColorMode = unitColMode;
-            this.unitColorUnified = unitColUni;
-            this.unitColorUp = unitColUp;
-            this.unitColorDown = unitColDn;
-
-            this.arrowColorMode = arrColMode;
-            this.arrowColorUnified = arrColUni;
-            this.arrowColorUp = arrColUp;
-            this.arrowColorDown = arrColDn;
-
-            SetupFonts();
-            UpdateCachedGdiResources();
-            if (flyoutForm != null && flyoutForm.Visible)
-            {
-                flyoutForm.ApplyTheme(IsWindowsDarkTheme(), currentLanguage);
-            }
-            this.Invalidate();
-        }
-
-        private bool IsAutoStartEnabled()
-        {
-            try
-            {
-                using (RegistryKey key = Registry.CurrentUser.OpenSubKey(REG_KEY_RUN, false))
-                {
-                    if (key != null)
-                    {
-                        return key.GetValue(APP_NAME) != null;
-                    }
-                }
-            }
-            catch { }
-            return false;
-        }
-
-        private void ToggleAutoStart(bool enable)
-        {
-            try
-            {
-                using (RegistryKey key = Registry.CurrentUser.OpenSubKey(REG_KEY_RUN, true))
-                {
-                    if (key != null)
-                    {
-                        if (enable)
-                        {
-                            key.SetValue(APP_NAME, "\"" + Application.ExecutablePath + "\"");
-                        }
-                        else
-                        {
-                            key.DeleteValue(APP_NAME, false);
-                        }
-                    }
-                }
-            }
-            catch { }
-        }
-
-        public void PositionWidget(bool forceReset = false)
-        {
-            int posX = -1;
-            int posY = -1;
-
-            if (!forceReset)
-            {
-                try
-                {
-                    using (RegistryKey key = Registry.CurrentUser.OpenSubKey(REG_KEY_APP))
-                    {
-                        if (key != null)
-                        {
-                            object xVal = key.GetValue("CustomX");
-                            object yVal = key.GetValue("CustomY");
-                            if (xVal != null && yVal != null)
-                            {
-                                posX = Convert.ToInt32(xVal);
-                                posY = Convert.ToInt32(yVal);
-                            }
-                        }
-                    }
-                }
-                catch { }
-            }
-
-            Screen primary = Screen.PrimaryScreen;
-            int taskbarTop = primary.WorkingArea.Bottom;
-            int taskbarH = primary.Bounds.Height - taskbarTop;
-            if (taskbarH <= 0) taskbarH = 48;
-
-            int calculatedY = taskbarTop + (taskbarH - WIDGET_HEIGHT) / 2;
-
-            if (posX <= 0 || posY <= 0 || forceReset)
-            {
-                IntPtr trayWnd = FindWindow("Shell_TrayWnd", null);
-                if (trayWnd != IntPtr.Zero)
-                {
-                    IntPtr notifyWnd = FindWindowEx(trayWnd, IntPtr.Zero, "TrayNotifyWnd", null);
-                    if (notifyWnd != IntPtr.Zero)
-                    {
-                        RECT notifyRect;
-                        GetWindowRect(notifyWnd, out notifyRect);
-                        posX = notifyRect.Left - WIDGET_WIDTH - 6;
-                    }
-                    else
-                    {
-                        posX = primary.Bounds.Width - 360;
-                    }
-                }
-                else
-                {
-                    posX = primary.Bounds.Width - 360;
-                }
-                posY = calculatedY;
-            }
-
-            // Proteção estrita multi-monitor
-            Screen targetScreen = Screen.FromPoint(new Point(posX, posY));
-            if (targetScreen == null) targetScreen = primary;
-
-            posX = Math.Max(targetScreen.Bounds.Left, Math.Min(posX, targetScreen.Bounds.Right - WIDGET_WIDTH));
-            posY = Math.Max(targetScreen.Bounds.Top, Math.Min(posY, targetScreen.Bounds.Bottom - WIDGET_HEIGHT));
-
-            this.Location = new Point(posX, posY);
-            SetWindowPos(this.Handle, HWND_TOPMOST, posX, posY, WIDGET_WIDTH, WIDGET_HEIGHT, SWP_NOACTIVATE | SWP_SHOWWINDOW);
-        }
-
         private NetworkInterface GetTargetNic()
         {
             NetworkInterface[] nics = NetworkInterface.GetAllNetworkInterfaces();
@@ -1270,997 +712,6 @@ namespace NetMonitor
             return bestNic;
         }
 
-        private void UpdateTraffic()
-        {
-            if (cachedNic == null || cachedNic.OperationalStatus != OperationalStatus.Up)
-            {
-                cachedNic = GetTargetNic();
-            }
-
-            if (cachedNic == null)
-            {
-                string fallbackUnit = (speedUnitFormat == "Bytes") ? "KB/s" : "Kbps";
-                if (strUpNum != "0.0" || strUpUnit != fallbackUnit || strDownNum != "0.0")
-                {
-                    strUpNum = "0.0";
-                    strUpUnit = (unitMode == "Auto") ? fallbackUnit : unitMode;
-                    strDownNum = "0.0";
-                    strDownUnit = strUpUnit;
-                    this.Invalidate();
-                }
-                return;
-            }
-
-            try
-            {
-                var stats = cachedNic.GetIPv4Statistics();
-                long currentIn = stats.BytesReceived;
-                long currentOut = stats.BytesSent;
-                DateTime now = DateTime.UtcNow;
-
-                if (lastBytesIn >= 0 && lastMeasurementTime != DateTime.MinValue)
-                {
-                    double elapsed = (now - lastMeasurementTime).TotalSeconds;
-                    if (elapsed > 0.1)
-                    {
-                        long diffIn = currentIn - lastBytesIn;
-                        long diffOut = currentOut - lastBytesOut;
-
-                        if (diffIn < 0) diffIn = 0;
-                        if (diffOut < 0) diffOut = 0;
-
-                        double bitsInPerSec = (diffIn * 8.0) / elapsed;
-                        double bitsOutPerSec = (diffOut * 8.0) / elapsed;
-                        latestPhysicalSpeedBytesPerSec = (diffIn + diffOut) / elapsed;
-
-                        string newUpNum, newUpUnit, newDownNum, newDownUnit;
-                        FormatSpeed(bitsOutPerSec, out newUpNum, out newUpUnit);
-                        FormatSpeed(bitsInPerSec, out newDownNum, out newDownUnit);
-
-                        // Otimização zero CPU: Só invalida se o valor mudou
-                        if (newUpNum != strUpNum || newUpUnit != strUpUnit ||
-                            newDownNum != strDownNum || newDownUnit != strDownUnit)
-                        {
-                            strUpNum = newUpNum;
-                            strUpUnit = newUpUnit;
-                            strDownNum = newDownNum;
-                            strDownUnit = newDownUnit;
-                            this.Invalidate();
-                        }
-                    }
-                }
-
-                lastBytesIn = currentIn;
-                lastBytesOut = currentOut;
-                lastMeasurementTime = now;
-            }
-            catch
-            {
-                cachedNic = null;
-            }
-        }
-
-        public void FormatSpeed(double bitsPerSec, out string num, out string unit)
-        {
-            if (speedUnitFormat == "Bytes")
-            {
-                double bytesPerSec = bitsPerSec / 8.0;
-
-                if (unitMode == "KB/s" || unitMode == "Kbps")
-                {
-                    double kb = bytesPerSec / 1024.0;
-                    num = (kb >= 100) ? kb.ToString("F0") : kb.ToString("F1");
-                    unit = "KB/s";
-                }
-                else if (unitMode == "MB/s" || unitMode == "Mbps")
-                {
-                    double mb = bytesPerSec / (1024.0 * 1024.0);
-                    num = (mb >= 100) ? mb.ToString("F0") : mb.ToString("F1");
-                    unit = "MB/s";
-                }
-                else if (unitMode == "GB/s" || unitMode == "Gbps")
-                {
-                    double gb = bytesPerSec / (1024.0 * 1024.0 * 1024.0);
-                    num = (gb >= 10) ? gb.ToString("F1") : gb.ToString("F2");
-                    unit = "GB/s";
-                }
-                else // Auto
-                {
-                    if (bytesPerSec >= (1024.0 * 1024.0 * 1024.0))
-                    {
-                        double gb = bytesPerSec / (1024.0 * 1024.0 * 1024.0);
-                        num = (gb >= 10) ? gb.ToString("F1") : gb.ToString("F2");
-                        unit = "GB/s";
-                    }
-                    else if (bytesPerSec >= (1024.0 * 1024.0))
-                    {
-                        double mb = bytesPerSec / (1024.0 * 1024.0);
-                        num = (mb >= 100) ? mb.ToString("F0") : mb.ToString("F1");
-                        unit = "MB/s";
-                    }
-                    else if (bytesPerSec >= 1024.0)
-                    {
-                        double kb = bytesPerSec / 1024.0;
-                        num = (kb >= 100) ? kb.ToString("F0") : kb.ToString("F1");
-                        unit = "KB/s";
-                    }
-                    else
-                    {
-                        num = bytesPerSec.ToString("F0");
-                        unit = "B/s";
-                    }
-                }
-            }
-            else // Bits (Padrão de fábrica)
-            {
-                if (unitMode == "Kbps" || unitMode == "KB/s")
-                {
-                    double kbps = bitsPerSec / 1000.0;
-                    num = (kbps >= 100) ? kbps.ToString("F0") : kbps.ToString("F1");
-                    unit = "Kbps";
-                }
-                else if (unitMode == "Mbps" || unitMode == "MB/s")
-                {
-                    double mbps = bitsPerSec / 1000000.0;
-                    num = (mbps >= 100) ? mbps.ToString("F0") : mbps.ToString("F1");
-                    unit = "Mbps";
-                }
-                else if (unitMode == "Gbps" || unitMode == "GB/s")
-                {
-                    double gbps = bitsPerSec / 1000000000.0;
-                    num = (gbps >= 10) ? gbps.ToString("F1") : gbps.ToString("F2");
-                    unit = "Gbps";
-                }
-                else // Auto
-                {
-                    if (bitsPerSec >= 1000000000.0)
-                    {
-                        double gbps = bitsPerSec / 1000000000.0;
-                        num = (gbps >= 10) ? gbps.ToString("F1") : gbps.ToString("F2");
-                        unit = "Gbps";
-                    }
-                    else if (bitsPerSec >= 1000000.0)
-                    {
-                        double mbps = bitsPerSec / 1000000.0;
-                        num = (mbps >= 100) ? mbps.ToString("F0") : mbps.ToString("F1");
-                        unit = "Mbps";
-                    }
-                    else if (bitsPerSec >= 1000.0)
-                    {
-                        double kbps = bitsPerSec / 1000.0;
-                        num = (kbps >= 100) ? kbps.ToString("F0") : kbps.ToString("F1");
-                        unit = "Kbps";
-                    }
-                    else
-                    {
-                        num = bitsPerSec.ToString("F0");
-                        unit = "bps";
-                    }
-                }
-            }
-        }
-
-        public static string ParseUnicodeString(string input, string fallback)
-        {
-            if (string.IsNullOrEmpty(input)) return fallback;
-            input = input.Trim();
-
-            if (input.StartsWith("\\u", StringComparison.OrdinalIgnoreCase) && input.Length == 6)
-            {
-                try
-                {
-                    int code = int.Parse(input.Substring(2), NumberStyles.HexNumber);
-                    return char.ConvertFromUtf32(code);
-                }
-                catch { }
-            }
-            if (input.StartsWith("U+", StringComparison.OrdinalIgnoreCase) && input.Length >= 6)
-            {
-                try
-                {
-                    int code = int.Parse(input.Substring(2), NumberStyles.HexNumber);
-                    return char.ConvertFromUtf32(code);
-                }
-                catch { }
-            }
-            return input;
-        }
-
-        protected override void OnPaint(PaintEventArgs e)
-        {
-            base.OnPaint(e);
-            Graphics g = e.Graphics;
-
-            g.Clear(currentBgColor);
-            g.TextRenderingHint = TextRenderingHint.ClearTypeGridFit;
-            g.SmoothingMode = SmoothingMode.AntiAlias;
-
-            if (arrowOnRight)
-            {
-                // ==============================================================
-                // LAYOUT: SETAS À DIREITA -> [ 823.6 Kbps  ▲ ] (Padrão de Fábrica)
-                // ==============================================================
-                RectangleF rUpNum = new RectangleF(2, 1, 46, 17);
-                RectangleF rDownNum = new RectangleF(2, 19, 46, 17);
-
-                g.DrawString(strUpNum, fontNum, brushNumUp, rUpNum, sfRight);
-                g.DrawString(strDownNum, fontNum, brushNumDown, rDownNum, sfRight);
-
-                RectangleF rUpUnit = new RectangleF(50, 1, 38, 17);
-                RectangleF rDownUnit = new RectangleF(50, 19, 38, 17);
-
-                g.DrawString(strUpUnit, fontUnit, brushUnitUp, rUpUnit, sfLeft);
-                g.DrawString(strDownUnit, fontUnit, brushUnitDown, rDownUnit, sfLeft);
-
-                DrawArrowIcon(g, 97.0f);
-            }
-            else
-            {
-                // ==============================================================
-                // LAYOUT: SETAS À ESQUERDA -> [ ▲  823.6 Kbps ]
-                // ==============================================================
-                DrawArrowIcon(g, 10.0f);
-
-                RectangleF rUpNum = new RectangleF(18, 1, 42, 17);
-                RectangleF rDownNum = new RectangleF(18, 19, 42, 17);
-
-                g.DrawString(strUpNum, fontNum, brushNumUp, rUpNum, sfRight);
-                g.DrawString(strDownNum, fontNum, brushNumDown, rDownNum, sfRight);
-
-                RectangleF rUpUnit = new RectangleF(62, 1, 40, 17);
-                RectangleF rDownUnit = new RectangleF(62, 19, 40, 17);
-
-                g.DrawString(strUpUnit, fontUnit, brushUnitUp, rUpUnit, sfLeft);
-                g.DrawString(strDownUnit, fontUnit, brushUnitDown, rDownUnit, sfLeft);
-            }
-        }
-
-        private void DrawArrowIcon(Graphics g, float centerX)
-        {
-            if (iconTemplate == "VectorTriangle")
-            {
-                PointF[] upArrow = new PointF[] {
-                    new PointF(centerX, 5.0f),
-                    new PointF(centerX - 4.0f, 10.2f),
-                    new PointF(centerX + 4.0f, 10.2f)
-                };
-                g.FillPolygon(brushArrowUp, upArrow);
-
-                PointF[] downArrow = new PointF[] {
-                    new PointF(centerX, 31.5f),
-                    new PointF(centerX - 4.0f, 26.3f),
-                    new PointF(centerX + 4.0f, 26.3f)
-                };
-                g.FillPolygon(brushArrowDown, downArrow);
-            }
-            else if (iconTemplate == "VectorChevron")
-            {
-                g.DrawLines(penArrowUp, new PointF[] {
-                    new PointF(centerX - 3.8f, 9.5f),
-                    new PointF(centerX, 5.5f),
-                    new PointF(centerX + 3.8f, 9.5f)
-                });
-                g.DrawLines(penArrowDown, new PointF[] {
-                    new PointF(centerX - 3.8f, 27.0f),
-                    new PointF(centerX, 31.0f),
-                    new PointF(centerX + 3.8f, 27.0f)
-                });
-            }
-            else if (iconTemplate == "VectorDualChevron")
-            {
-                g.DrawLines(penArrowUp, new PointF[] {
-                    new PointF(centerX - 3.5f, 6.8f),
-                    new PointF(centerX, 3.8f),
-                    new PointF(centerX + 3.5f, 6.8f)
-                });
-                g.DrawLines(penArrowUp, new PointF[] {
-                    new PointF(centerX - 3.5f, 10.5f),
-                    new PointF(centerX, 7.5f),
-                    new PointF(centerX + 3.5f, 10.5f)
-                });
-
-                g.DrawLines(penArrowDown, new PointF[] {
-                    new PointF(centerX - 3.5f, 26.0f),
-                    new PointF(centerX, 29.0f),
-                    new PointF(centerX + 3.5f, 26.0f)
-                });
-                g.DrawLines(penArrowDown, new PointF[] {
-                    new PointF(centerX - 3.5f, 29.5f),
-                    new PointF(centerX, 32.5f),
-                    new PointF(centerX + 3.5f, 29.5f)
-                });
-            }
-            else if (iconTemplate == "StreamTech")
-            {
-                g.DrawLine(penArrowUp, centerX - 3.5f, 10.5f, centerX + 3.0f, 4.5f);
-                g.DrawLines(penArrowUp, new PointF[] {
-                    new PointF(centerX - 1.0f, 4.5f),
-                    new PointF(centerX + 3.0f, 4.5f),
-                    new PointF(centerX + 3.0f, 8.5f)
-                });
-
-                g.DrawLine(penArrowDown, centerX - 3.5f, 26.5f, centerX + 3.0f, 32.5f);
-                g.DrawLines(penArrowDown, new PointF[] {
-                    new PointF(centerX + 3.0f, 28.5f),
-                    new PointF(centerX + 3.0f, 32.5f),
-                    new PointF(centerX - 1.0f, 32.5f)
-                });
-            }
-            else
-            {
-                string upCh = ParseUnicodeString(customUpChar, "▲");
-                string downCh = ParseUnicodeString(customDownChar, "▼");
-
-                RectangleF rUp = new RectangleF(centerX - 8, 1, 16, 17);
-                RectangleF rDown = new RectangleF(centerX - 8, 19, 16, 17);
-
-                g.DrawString(upCh, fontUnicode, brushArrowUp, rUp, sfCenter);
-                g.DrawString(downCh, fontUnicode, brushArrowDown, rDown, sfCenter);
-            }
-        }
-
-        private void BuildContextMenu()
-        {
-            bool isPt = currentLanguage == "pt";
-            bool isDark = IsWindowsDarkTheme();
-
-            contextMenu = new ContextMenuStrip();
-            contextMenu.Opening += (s, e) => { HideFlyout(); };
-            contextMenu.Renderer = new Windows11MenuRenderer(isDark);
-            contextMenu.ShowCheckMargin = true;
-            contextMenu.ShowImageMargin = false;
-
-            // 0. Configurações / Settings
-            ToolStripMenuItem mnuSettings = new ToolStripMenuItem(isPt ? "Configurações..." : "Settings...");
-            mnuSettings.Font = new Font(mnuSettings.Font, FontStyle.Bold);
-            mnuSettings.Click += (s, e) => OpenSettingsDialog();
-            contextMenu.Items.Add(mnuSettings);
-
-            contextMenu.Items.Add(new ToolStripSeparator());
-
-            // 1. Placa de Rede / Network Adapter
-            ToolStripMenuItem mnuAdapters = new ToolStripMenuItem(isPt ? "Placa de Rede" : "Network Adapter");
-            ConfigureSubmenu(mnuAdapters);
-            PopulateAdaptersMenu(mnuAdapters);
-            contextMenu.Items.Add(mnuAdapters);
-
-            // 2. Formato e Unidades
-            ToolStripMenuItem mnuUnits = new ToolStripMenuItem(isPt ? "Unidade de Medição" : "Speed Unit");
-            ConfigureSubmenu(mnuUnits);
-            PopulateUnitsMenu(mnuUnits);
-            contextMenu.Items.Add(mnuUnits);
-
-            // 3. Posição das Setas / Layout
-            ToolStripMenuItem mnuLayout = new ToolStripMenuItem(isPt ? "Posição das Setas" : "Arrow Position");
-            ConfigureSubmenu(mnuLayout);
-
-            ToolStripMenuItem itmRight = new ToolStripMenuItem(isPt ? "Setas à Direita (823 Kbps ▲)" : "Arrows on Right (823 Kbps ▲)");
-            itmRight.Checked = arrowOnRight;
-            itmRight.Click += (s, e) => { arrowOnRight = true; SaveSettings(); BuildContextMenu(); this.Invalidate(); };
-
-            ToolStripMenuItem itmLeft = new ToolStripMenuItem(isPt ? "Setas à Esquerda (▲ 823 Kbps)" : "Arrows on Left (▲ 823 Kbps)");
-            itmLeft.Checked = !arrowOnRight;
-            itmLeft.Click += (s, e) => { arrowOnRight = false; SaveSettings(); BuildContextMenu(); this.Invalidate(); };
-
-            mnuLayout.DropDownItems.Add(itmRight);
-            mnuLayout.DropDownItems.Add(itmLeft);
-            contextMenu.Items.Add(mnuLayout);
-
-            // 4. Idioma da Interface / Language
-            ToolStripMenuItem mnuLang = new ToolStripMenuItem(isPt ? "Idioma" : "Language");
-            ConfigureSubmenu(mnuLang);
-
-            ToolStripMenuItem itmPt = new ToolStripMenuItem("Português (Brasil)");
-            itmPt.Checked = isPt;
-            itmPt.Click += (s, e) =>
-            {
-                currentLanguage = "pt";
-                SaveSettings();
-                BuildContextMenu();
-                this.Invalidate();
-            };
-
-            ToolStripMenuItem itmEn = new ToolStripMenuItem("English (United States)");
-            itmEn.Checked = !isPt;
-            itmEn.Click += (s, e) =>
-            {
-                currentLanguage = "en";
-                SaveSettings();
-                BuildContextMenu();
-                this.Invalidate();
-            };
-
-            mnuLang.DropDownItems.Add(itmPt);
-            mnuLang.DropDownItems.Add(itmEn);
-            contextMenu.Items.Add(mnuLang);
-
-            contextMenu.Items.Add(new ToolStripSeparator());
-
-            // 5. Travar Posição
-            ToolStripMenuItem mnuLock = new ToolStripMenuItem(isPt ? "Travar Posição" : "Lock Position");
-            mnuLock.Checked = isLocked;
-            mnuLock.Click += (s, e) =>
-            {
-                isLocked = !isLocked;
-                mnuLock.Checked = isLocked;
-                SaveSettings();
-            };
-            contextMenu.Items.Add(mnuLock);
-
-            // 6. Iniciar com o Windows
-            ToolStripMenuItem mnuAutoStart = new ToolStripMenuItem(isPt ? "Iniciar com o Windows" : "Start with Windows");
-            mnuAutoStart.Checked = IsAutoStartEnabled();
-            mnuAutoStart.Click += (s, e) =>
-            {
-                bool newState = !mnuAutoStart.Checked;
-                ToggleAutoStart(newState);
-                mnuAutoStart.Checked = newState;
-            };
-            contextMenu.Items.Add(mnuAutoStart);
-
-            // 7. Redefinir Posição
-            ToolStripMenuItem mnuReset = new ToolStripMenuItem(isPt ? "Redefinir Posição" : "Reset Position");
-            mnuReset.Click += (s, e) => PositionWidget(true);
-            contextMenu.Items.Add(mnuReset);
-
-            contextMenu.Items.Add(new ToolStripSeparator());
-
-            // 8. Desenvolvedor / Developer
-            ToolStripMenuItem mnuDev = new ToolStripMenuItem("Noé VFX (noevfx.com)");
-            mnuDev.Click += (s, e) =>
-            {
-                try { Process.Start("https://noevfx.com"); } catch { }
-            };
-            contextMenu.Items.Add(mnuDev);
-
-            contextMenu.Items.Add(new ToolStripSeparator());
-
-            // 9. Sair / Exit
-            ToolStripMenuItem mnuExit = new ToolStripMenuItem(isPt ? "Sair" : "Exit");
-            mnuExit.Click += (s, e) =>
-            {
-                try
-                {
-                    HideFlyout();
-                    if (flyoutForm != null && !flyoutForm.IsDisposed)
-                    {
-                        flyoutForm.Dispose();
-                        flyoutForm = null;
-                    }
-                    this.Close();
-                }
-                catch
-                {
-                    Environment.Exit(0);
-                }
-            };
-            contextMenu.Items.Add(mnuExit);
-        }
-
-        private void ConfigureSubmenu(ToolStripMenuItem parent)
-        {
-            parent.DropDown.DropShadowEnabled = true;
-            parent.DropDownOpening += (s, e) =>
-            {
-                Screen scr = Screen.FromControl(this);
-                if (contextMenu.Right + parent.DropDown.Width > scr.WorkingArea.Right)
-                {
-                    parent.DropDownDirection = ToolStripDropDownDirection.Left;
-                }
-                else
-                {
-                    parent.DropDownDirection = ToolStripDropDownDirection.Right;
-                }
-            };
-        }
-
-        private void PopulateAdaptersMenu(ToolStripMenuItem parent)
-        {
-            parent.DropDownItems.Clear();
-            bool isPt = currentLanguage == "pt";
-
-            ToolStripMenuItem itmAuto = new ToolStripMenuItem(isPt ? "Automático (Maior Tráfego)" : "Auto (Highest Traffic)");
-            itmAuto.Checked = string.Equals(selectedNicId, "Auto", StringComparison.OrdinalIgnoreCase);
-            itmAuto.Click += (s, e) =>
-            {
-                selectedNicId = "Auto";
-                cachedNic = null;
-                lastBytesIn = -1;
-                lastBytesOut = -1;
-                SaveSettings();
-                PopulateAdaptersMenu(parent);
-                UpdateTraffic();
-            };
-            parent.DropDownItems.Add(itmAuto);
-            parent.DropDownItems.Add(new ToolStripSeparator());
-
-            NetworkInterface[] nics = NetworkInterface.GetAllNetworkInterfaces();
-            foreach (var nic in nics)
-            {
-                if (nic.NetworkInterfaceType == NetworkInterfaceType.Loopback ||
-                    nic.NetworkInterfaceType == NetworkInterfaceType.Tunnel) continue;
-
-                string id = nic.Id;
-                string name = string.Format("{0} ({1})", nic.Name, nic.Description);
-                if (name.Length > 45) name = name.Substring(0, 42) + "...";
-
-                ToolStripMenuItem itm = new ToolStripMenuItem(name);
-                itm.Checked = (selectedNicId == id || selectedNicId == nic.Name);
-                itm.Click += (s, e) =>
-                {
-                    selectedNicId = id;
-                    cachedNic = null;
-                    lastBytesIn = -1;
-                    lastBytesOut = -1;
-                    SaveSettings();
-                    PopulateAdaptersMenu(parent);
-                    UpdateTraffic();
-                };
-                parent.DropDownItems.Add(itm);
-            }
-        }
-
-        private void PopulateUnitsMenu(ToolStripMenuItem parent)
-        {
-            parent.DropDownItems.Clear();
-            bool isPt = currentLanguage == "pt";
-
-            // Seletor Bits vs Bytes
-            ToolStripMenuItem itmBits = new ToolStripMenuItem(isPt ? "Formato: Bits (Mbps, Kbps) [Padrão]" : "Format: Bits (Mbps, Kbps) [Default]");
-            itmBits.Checked = (speedUnitFormat == "Bits");
-            itmBits.Click += (s, e) =>
-            {
-                speedUnitFormat = "Bits";
-                SaveSettings();
-                PopulateUnitsMenu(parent);
-                this.Invalidate();
-            };
-            parent.DropDownItems.Add(itmBits);
-
-            ToolStripMenuItem itmBytes = new ToolStripMenuItem(isPt ? "Formato: Bytes (MB/s, KB/s)" : "Format: Bytes (MB/s, KB/s)");
-            itmBytes.Checked = (speedUnitFormat == "Bytes");
-            itmBytes.Click += (s, e) =>
-            {
-                speedUnitFormat = "Bytes";
-                SaveSettings();
-                PopulateUnitsMenu(parent);
-                this.Invalidate();
-            };
-            parent.DropDownItems.Add(itmBytes);
-
-            parent.DropDownItems.Add(new ToolStripSeparator());
-
-            string[] modes = (speedUnitFormat == "Bytes") ?
-                new string[] { "Auto", "KB/s", "MB/s", "GB/s" } :
-                new string[] { "Auto", "Kbps", "Mbps", "Gbps" };
-
-            foreach (var mode in modes)
-            {
-                string label = mode == "Auto" ? (isPt ? "Escala Automática" : "Auto Scale") : mode;
-                ToolStripMenuItem itm = new ToolStripMenuItem(label);
-                itm.Checked = (unitMode == mode);
-                itm.Click += (s, e) =>
-                {
-                    unitMode = mode;
-                    SaveSettings();
-                    PopulateUnitsMenu(parent);
-                    this.Invalidate();
-                };
-                parent.DropDownItems.Add(itm);
-            }
-        }
-
-        private void OpenSettingsDialog()
-        {
-            // Snapshot do estado original para cancelamento seguro
-            string origLang = currentLanguage;
-            string origFormat = speedUnitFormat;
-            string origUnit = unitMode;
-            bool origArrow = arrowOnRight;
-            bool origLocked = isLocked;
-            bool origHideSs = hideOnScreensaver;
-            bool origFollow = followSystemTheme;
-            string origTpl = iconTemplate;
-            string origUp = customUpChar;
-            string origDown = customDownChar;
-            string origFontF = fontFamily;
-            float origFontS = fontSize;
-            FontStyle origFontSt = fontStyle;
-            string origTm = textColorMode;
-            Color origTu = textColorUnified;
-            Color origTup = textColorUp;
-            Color origTdn = textColorDown;
-            string origUm = unitColorMode;
-            Color origUu = unitColorUnified;
-            Color origUup = unitColorUp;
-            Color origUdn = unitColorDown;
-            string origAm = arrowColorMode;
-            Color origAu = arrowColorUnified;
-            Color origAup = arrowColorUp;
-            Color origAdn = arrowColorDown;
-            bool origHover = showHoverFlyout;
-
-            isSettingsDialogOpen = true;
-
-            try
-            {
-                using (SettingsForm sf = new SettingsForm(
-                    this,
-                    currentLanguage,
-                    speedUnitFormat,
-                    unitMode,
-                    arrowOnRight,
-                    isLocked,
-                    hideOnScreensaver,
-                    showHoverFlyout,
-                    followSystemTheme,
-                    iconTemplate,
-                    customUpChar,
-                    customDownChar,
-                    fontFamily,
-                    fontSize,
-                    fontStyle,
-                    textColorMode,
-                    textColorUnified,
-                    textColorUp,
-                    textColorDown,
-                    unitColorMode,
-                    unitColorUnified,
-                    unitColorUp,
-                    unitColorDown,
-                    arrowColorMode,
-                    arrowColorUnified,
-                    arrowColorUp,
-                    arrowColorDown))
-                {
-                    if (sf.ShowDialog() == DialogResult.OK)
-                    {
-                        SaveSettings();
-                        BuildContextMenu();
-                    }
-                    else
-                    {
-                        // Se cancelar, restaura o snapshot original instantaneamente
-                        ApplyLiveTuning(
-                            origLang, origFormat, origUnit, origArrow, origLocked, origHideSs, origHover,
-                            origTpl, origUp, origDown, origFontF, origFontS, origFontSt,
-                            origTm, origTu, origTup, origTdn,
-                            origUm, origUu, origUup, origUdn,
-                            origAm, origAu, origAup, origAdn);
-                    }
-                }
-            }
-            finally
-            {
-                isSettingsDialogOpen = false;
-                try { GC.Collect(2, GCCollectionMode.Optimized); } catch { }
-            }
-        }
-
-        private void NetMonitorApp_MouseDown(object sender, MouseEventArgs e)
-        {
-            if (e.Button == MouseButtons.Left)
-            {
-                HideFlyout();
-                if (!isLocked)
-                {
-                    ReleaseCapture();
-                    SendMessage(this.Handle, WM_NCLBUTTONDOWN, HT_CAPTION, 0);
-
-                    // Validação multi-monitor pós-arrasto (nunca vaza para o monitor vizinho)
-                    Screen scr = Screen.FromControl(this);
-                    if (scr != null)
-                    {
-                        Rectangle b = scr.Bounds;
-                        int clX = Math.Max(b.Left, Math.Min(this.Left, b.Right - WIDGET_WIDTH));
-                        int clY = Math.Max(b.Top, Math.Min(this.Top, b.Bottom - WIDGET_HEIGHT));
-                        if (clX != this.Left || clY != this.Top)
-                        {
-                            this.Location = new Point(clX, clY);
-                        }
-                    }
-                    SaveSettings();
-                }
-            }
-        }
-
-        private void NetMonitorApp_MouseUp(object sender, MouseEventArgs e)
-        {
-            if (e.Button == MouseButtons.Right)
-            {
-                HideFlyout();
-                Screen scr = Screen.FromControl(this);
-                if (scr == null) scr = Screen.PrimaryScreen;
-                Rectangle b = scr.Bounds;
-
-                Size pref = contextMenu.PreferredSize;
-                int mnuW = pref.Width > 0 ? pref.Width : (contextMenu.Width > 0 ? contextMenu.Width : 220);
-                int mnuH = pref.Height > 0 ? pref.Height : (contextMenu.Height > 0 ? contextMenu.Height : 260);
-
-                // Ancorado diretamente sobre o widget na barra de tarefas
-                int x = this.Left;
-                if (x + mnuW > b.Right - 4) x = b.Right - mnuW - 4;
-                if (x < b.Left + 4) x = b.Left + 4;
-
-                int y = this.Top - mnuH - 2;
-                if (y < b.Top + 4)
-                {
-                    y = this.Bottom + 2;
-                }
-
-                contextMenu.Show(x, y);
-            }
-        }
-
-        private void OnWidgetMouseEnter(object sender, EventArgs e)
-        {
-            if (!showHoverFlyout || isSettingsDialogOpen || isScreensaverRunning || isSessionLocked) return;
-            if (contextMenu != null && contextMenu.Visible) return;
-            ShowFlyout();
-        }
-
-        private void OnWidgetMouseLeave(object sender, EventArgs e)
-        {
-            if (hoverCheckTimer != null && !hoverCheckTimer.Enabled)
-            {
-                hoverCheckTimer.Start();
-            }
-        }
-
-        private void ShowFlyout()
-        {
-            if (!showHoverFlyout || isSettingsDialogOpen || isScreensaverRunning || isSessionLocked) return;
-
-            if (flyoutForm == null || flyoutForm.IsDisposed)
-            {
-                flyoutForm = new NetworkTopProcessesFlyout();
-                flyoutForm.MouseEnter += (s, e) => { /* Mantém aberto enquanto cursor estiver no card */ };
-                flyoutForm.MouseLeave += (s, e) => { if (hoverCheckTimer != null && !hoverCheckTimer.Enabled) hoverCheckTimer.Start(); };
-            }
-
-            PositionFlyout();
-            flyoutForm.ApplyTheme(IsWindowsDarkTheme(), currentLanguage);
-
-            if (!flyoutForm.Visible)
-            {
-                flyoutForm.Show();
-                SetWindowPos(flyoutForm.Handle, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
-            }
-
-            isHoverSampling = true;
-            lastProcessIo.Clear();
-
-            // Amostragem inicial imediata assíncrona
-            ThreadPool.QueueUserWorkItem(DoProcessSampleWork);
-
-            if (processSampleTimer == null)
-            {
-                processSampleTimer = new Timer();
-                processSampleTimer.Interval = 1000;
-                processSampleTimer.Tick += (s, e) =>
-                {
-                    if (isHoverSampling && flyoutForm != null && flyoutForm.Visible)
-                    {
-                        ThreadPool.QueueUserWorkItem(DoProcessSampleWork);
-                    }
-                    else
-                    {
-                        processSampleTimer.Stop();
-                    }
-                };
-            }
-            processSampleTimer.Start();
-
-            if (hoverCheckTimer == null)
-            {
-                hoverCheckTimer = new Timer();
-                hoverCheckTimer.Interval = 200;
-                hoverCheckTimer.Tick += HoverCheckTimer_Tick;
-            }
-            hoverCheckTimer.Start();
-        }
-
-        private void HoverCheckTimer_Tick(object sender, EventArgs e)
-        {
-            Point cursor = Cursor.Position;
-            bool overWidget = this.Visible && this.Bounds.Contains(cursor);
-            bool overFlyout = (flyoutForm != null && flyoutForm.Visible && flyoutForm.Bounds.Contains(cursor));
-
-            if (!overWidget && !overFlyout)
-            {
-                HideFlyout();
-            }
-        }
-
-        private void HideFlyout()
-        {
-            isHoverSampling = false;
-            if (processSampleTimer != null) processSampleTimer.Stop();
-            if (hoverCheckTimer != null) hoverCheckTimer.Stop();
-
-            if (flyoutForm != null && flyoutForm.Visible)
-            {
-                flyoutForm.Hide();
-            }
-
-            lastProcessIo.Clear();
-            cachedProcessNames.Clear();
-        }
-
-        private void PositionFlyout()
-        {
-            if (flyoutForm == null) return;
-            int flyoutW = flyoutForm.Width;
-            int flyoutH = flyoutForm.Height;
-
-            Screen scr = Screen.FromControl(this);
-            if (scr == null) scr = Screen.PrimaryScreen;
-            Rectangle wa = scr.WorkingArea;
-
-            int desiredX = this.Left + (this.Width - flyoutW) / 2;
-            int desiredY = this.Top - flyoutH - 8;
-
-            int clampedX = Math.Max(wa.Left + 6, Math.Min(wa.Right - flyoutW - 6, desiredX));
-            int clampedY = desiredY;
-
-            if (clampedY < wa.Top + 6)
-            {
-                clampedY = this.Bottom + 8;
-            }
-            if (clampedY + flyoutH > wa.Bottom - 6)
-            {
-                clampedY = wa.Bottom - flyoutH - 6;
-            }
-
-            flyoutForm.Location = new Point(clampedX, clampedY);
-        }
-
-        private void DoProcessSampleWork(object state)
-        {
-            if (!isHoverSampling || flyoutForm == null || !flyoutForm.Visible) return;
-
-            try
-            {
-                HashSet<int> activePids = GetActiveNetworkPids();
-                if (activePids.Count == 0)
-                {
-                    if (flyoutForm != null && flyoutForm.Visible && flyoutForm.IsHandleCreated)
-                    {
-                        flyoutForm.BeginInvoke((MethodInvoker)delegate
-                        {
-                            if (flyoutForm != null && flyoutForm.Visible)
-                            {
-                                flyoutForm.UpdateItems(new List<ProcessTrafficItem>());
-                            }
-                        });
-                    }
-                    return;
-                }
-
-                double physSpeed = latestPhysicalSpeedBytesPerSec;
-
-                // Agrupamento por software/aplicativo (soma tráfego de múltiplos workers e instâncias)
-                Dictionary<string, ulong> appTraffic = new Dictionary<string, ulong>(StringComparer.OrdinalIgnoreCase);
-                Dictionary<string, int> appPrimaryPid = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
-
-                foreach (int pid in activePids)
-                {
-                    IntPtr hProc = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid);
-                    if (hProc != IntPtr.Zero)
-                    {
-                        try
-                        {
-                            IO_COUNTERS counters;
-                            if (GetProcessIoCounters(hProc, out counters))
-                            {
-                                ulong total = counters.ReadTransferCount + counters.WriteTransferCount;
-                                if (lastProcessIo.ContainsKey(pid))
-                                {
-                                    ulong last = lastProcessIo[pid];
-                                    if (total >= last)
-                                    {
-                                        ulong delta = total - last;
-                                        if (delta > 0)
-                                        {
-                                            // Isolamento estrito de I/O de disco:
-                                            // Um processo individual nunca pode transferir mais dados de rede do que
-                                            // a taxa física real medida na placa de rede.
-                                            // Qualquer excesso massivo de I/O é gravação/leitura de disco local (SSD/HD) e é descartado.
-                                            ulong maxAllowed = (ulong)(physSpeed * 1.20) + 4096;
-                                            if (delta > maxAllowed)
-                                            {
-                                                delta = (physSpeed > 100) ? (ulong)physSpeed : 0;
-                                            }
-
-                                            if (delta > 0)
-                                            {
-                                                string baseName = GetProcessName(pid);
-                                                if (baseName.EndsWith(".exe", StringComparison.OrdinalIgnoreCase))
-                                                    baseName = baseName.Substring(0, baseName.Length - 4);
-
-                                                if (!appTraffic.ContainsKey(baseName))
-                                                {
-                                                    appTraffic[baseName] = 0;
-                                                    appPrimaryPid[baseName] = pid;
-                                                }
-                                                appTraffic[baseName] += delta;
-                                            }
-                                        }
-                                    }
-                                }
-                                lastProcessIo[pid] = total;
-                            }
-                        }
-                        finally
-                        {
-                            CloseHandle(hProc);
-                        }
-                    }
-                }
-
-                // Limpeza periódica de PIDs inativos de lastProcessIo
-                if (lastProcessIo.Count > 100)
-                {
-                    List<int> toRemove = new List<int>();
-                    foreach (var k in lastProcessIo.Keys)
-                    {
-                        if (!activePids.Contains(k)) toRemove.Add(k);
-                    }
-                    for (int i = 0; i < toRemove.Count; i++) lastProcessIo.Remove(toRemove[i]);
-                }
-
-                // Normalização coletiva: a soma de todos os apps nunca deve ultrapassar a banda física real da placa
-                ulong totalAppBytes = 0;
-                foreach (var v in appTraffic.Values) totalAppBytes += v;
-
-                ulong maxTotalAllowed = (ulong)(physSpeed * 1.25) + 8192;
-                if (totalAppBytes > maxTotalAllowed && totalAppBytes > 0 && physSpeed > 0)
-                {
-                    double scale = physSpeed / (double)totalAppBytes;
-                    List<string> keys = new List<string>(appTraffic.Keys);
-                    foreach (var k in keys)
-                    {
-                        appTraffic[k] = (ulong)(appTraffic[k] * scale);
-                    }
-                }
-
-                List<ProcessTrafficItem> groupedItems = new List<ProcessTrafficItem>();
-                foreach (var kvp in appTraffic)
-                {
-                    if (kvp.Value == 0 && physSpeed > 500) continue;
-
-                    groupedItems.Add(new ProcessTrafficItem
-                    {
-                        Pid = appPrimaryPid[kvp.Key],
-                        Name = kvp.Key,
-                        DeltaBytes = kvp.Value,
-                        SpeedText = FormatSpeedForProcess(kvp.Value)
-                    });
-                }
-
-                // Ordenação dinâmica em tempo real (maior consumo primeiro)
-                groupedItems.Sort((a, b) => b.DeltaBytes.CompareTo(a.DeltaBytes));
-
-                List<ProcessTrafficItem> top5 = new List<ProcessTrafficItem>();
-                for (int i = 0; i < groupedItems.Count && i < 5; i++)
-                {
-                    top5.Add(groupedItems[i]);
-                }
-
-                if (flyoutForm != null && flyoutForm.Visible && flyoutForm.IsHandleCreated)
-                {
-                    flyoutForm.BeginInvoke((MethodInvoker)delegate
-                    {
-                        if (flyoutForm != null && flyoutForm.Visible)
-                        {
-                            flyoutForm.UpdateItems(top5);
-                        }
-                    });
-                }
-            }
-            catch { }
-        }
-
         private static HashSet<int> GetActiveNetworkPids()
         {
             HashSet<int> pids = new HashSet<int>();
@@ -2290,7 +741,7 @@ namespace NetMonitor
                                 byte locFirst = (byte)(loc & 0xFF);
 
                                 // Ignora 0.0.0.0 e loopback 127.x.x.x
-                                if (rem != 0 && remFirst != 127 && locFirst != 127)
+                                if (rem != 0 && (!filterLoopback || (remFirst != 127 && locFirst != 127)))
                                 {
                                     pids.Add(row.owningPid);
                                 }
@@ -2328,7 +779,7 @@ namespace NetMonitor
                                     // Verifica se é loopback ::1
                                     bool isLoopback6 = true;
                                     for (int b = 0; b < 15; b++) { if (row.ucRemoteAddr[b] != 0) { isLoopback6 = false; break; } }
-                                    if (!(isLoopback6 && row.ucRemoteAddr[15] == 1))
+                                    if (!filterLoopback || !(isLoopback6 && row.ucRemoteAddr[15] == 1))
                                     {
                                         // Verifica link-local fe80::
                                         if (!(row.ucRemoteAddr[0] == 0xFE && (row.ucRemoteAddr[1] & 0xC0) == 0x80))
@@ -2364,7 +815,7 @@ namespace NetMonitor
                             if (row.owningPid > 4)
                             {
                                 byte locFirst = (byte)(row.localAddr & 0xFF);
-                                if (row.localAddr != 0 && locFirst != 127)
+                                if (row.localAddr != 0 && (!filterLoopback || locFirst != 127))
                                 {
                                     pids.Add(row.owningPid);
                                 }
@@ -2396,7 +847,7 @@ namespace NetMonitor
                             {
                                 bool isLoopback6 = true;
                                 for (int b = 0; b < 15; b++) { if (row.ucLocalAddr[b] != 0) { isLoopback6 = false; break; } }
-                                if (!(isLoopback6 && row.ucLocalAddr[15] == 1))
+                                if (!filterLoopback || !(isLoopback6 && row.ucLocalAddr[15] == 1))
                                 {
                                     pids.Add(row.owningPid);
                                 }
@@ -2453,26 +904,852 @@ namespace NetMonitor
             }
         }
 
-        private string FormatSpeedForProcess(ulong deltaBytes)
+
+        // ------------------------------------------------------------------ timer principal
+        private void SetupTimer()
         {
-            if (speedUnitFormat == "Bytes")
+            int tickCount = 0;
+            updateTimer = new Timer();
+            updateTimer.Interval = 300;
+            bool ssCached = false;
+            int ssTick = 0;
+            updateTimer.Tick += (s, e) =>
             {
-                double bytes = deltaBytes;
-                if (bytes >= 1073741824.0) return string.Format("{0:0.0} GB/s", bytes / 1073741824.0);
-                if (bytes >= 1048576.0) return string.Format("{0:0.0} MB/s", bytes / 1048576.0);
-                if (bytes >= 1024.0) return string.Format("{0:0} KB/s", bytes / 1024.0);
-                return string.Format("{0} B/s", bytes);
+                if (S.HideOnScreensaver)
+                {
+                    // a varredura de protetor de tela é cara: roda a cada ~0,9 s, não a cada tick de 300 ms
+                    if (ssTick++ % 3 == 0) ssCached = IsAnyScreensaverActive();
+                    bool ss = ssCached;
+                    if (ss || isSessionLocked)
+                    {
+                        if (!isScreensaverRunning || this.Visible)
+                        {
+                            isScreensaverRunning = true;
+                            this.Visible = false;
+                            SetWindowPos(this.Handle, IntPtr.Zero, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_HIDEWINDOW);
+                            HideFlyout(true);
+                        }
+                        return;
+                    }
+                    else if (isScreensaverRunning || !this.Visible)
+                    {
+                        isScreensaverRunning = false;
+                        this.Visible = true;
+                        PositionWidget();
+                    }
+                }
+
+                tickCount++;
+                if (tickCount >= 3)
+                {
+                    tickCount = 0;
+                    UpdateTraffic();
+                    if (settingsOpen) PushData();
+                    if (IsWindowsDarkTheme() != lastSystemDark) { ApplySystemTheme(); ScheduleThemeRepaint(); }
+                    if (!customPos && this.Visible && !isScreensaverRunning)
+                    {
+                        Point a = AutoAnchor();
+                        if (a != this.Location) { this.Location = a; if (flyout != null && flyout.Visible) PositionFlyout(); }
+                    }
+                }
+
+                if (this.Visible && !isScreensaverRunning && !isSessionLocked)
+                {
+                    SetWindowPos(this.Handle, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+                }
+            };
+            updateTimer.Start();
+            UpdateTraffic();
+        }
+
+        private void BindToTaskbarOwner()
+        {
+            try
+            {
+                IntPtr trayWnd = FindWindow("Shell_TrayWnd", null);
+                if (trayWnd != IntPtr.Zero) SetWindowLongPtr(this.Handle, GWLP_HWNDPARENT, trayWnd);
             }
-            else // Bits (Padrão)
+            catch { }
+        }
+
+        protected override void WndProc(ref Message m)
+        {
+            const int WM_SETTINGCHANGE = 0x001A;
+            const int WM_THEMECHANGED = 0x031A;
+            if (m.Msg == WM_SETTINGCHANGE || m.Msg == WM_THEMECHANGED || m.Msg == 0x031E /* DWMCOMPOSITIONCHANGED */ || m.Msg == 0x0320 /* DWMCOLORIZATIONCOLORCHANGED */)
             {
-                double bits = deltaBytes * 8.0;
-                if (bits >= 1000000000.0) return string.Format("{0:0.0} Gbps", bits / 1000000000.0);
-                if (bits >= 1000000.0) return string.Format("{0:0.0} Mbps", bits / 1000000.0);
-                if (bits >= 1000.0) return string.Format("{0:0} Kbps", bits / 1000.0);
-                return string.Format("{0:0} bps", bits);
+                ApplySystemTheme();
+                ScheduleThemeRepaint();
+            }
+
+            if (m.Msg == WM_DISPLAYCHANGE)
+            {
+                PositionWidget(false);
+                if (flyout != null && flyout.Visible) PositionFlyout();
+            }
+
+            if (m.Msg == Ipc.WM_COPYDATA)
+            {
+                int code; string text;
+                if (Ipc.Read(m.LParam, out code, out text)) { OnIpc(code, text, m.WParam); m.Result = new IntPtr(1); return; }
+            }
+
+            if (m.Msg == WM_DPICHANGED)
+            {
+                MeasureWidget();
+                RenderWidget();
+                if (flyout != null && flyout.Visible) UpdateFlyout();
+            }
+
+            if (m.Msg == WM_WINDOWPOSCHANGING)
+            {
+                if (this.Visible && !isScreensaverRunning && !isSessionLocked)
+                {
+                    WINDOWPOS pos = (WINDOWPOS)Marshal.PtrToStructure(m.LParam, typeof(WINDOWPOS));
+                    pos.hwndInsertAfter = HWND_TOPMOST;
+                    Marshal.StructureToPtr(pos, m.LParam, false);
+                }
+            }
+            base.WndProc(ref m);
+        }
+
+        // ------------------------------------------------------------------ configurações
+        // Aplica um novo conjunto de configurações (thread da interface). persist=true grava no registro.
+        private void ApplyInternal(AppSettings ns, bool persist)
+        {
+            string oldAdapter;
+            lock (sLock) { oldAdapter = S.Adapter; S = ns; }
+            filterLoopback = S.LoopbackFilter;
+            lastSystemDark = IsWindowsDarkTheme();
+            if (persist) S.Save();
+            if (!string.Equals(oldAdapter, S.Adapter, StringComparison.OrdinalIgnoreCase))
+            {
+                cachedNic = null; lastBytesIn = -1; lastBytesOut = -1; // trocou de placa: recomeça a medição
+            }
+            RenderWidget();
+            if (!S.FlyoutEnabled)
+            {
+                // desligado: descarta a janela e a imagem; recriadas se o usuário religar
+                if (hoverCheckTimer != null) hoverCheckTimer.Stop();
+                if (flyout != null) { flyout.Dispose(); flyout = null; }
+            }
+            else if (S.FlyoutPinned && !isScreensaverRunning && !isSessionLocked) ShowFlyout();
+            else if (flyout != null && flyout.Visible)
+            {
+                UpdateFlyout();
+                if (!S.FlyoutPinned && !this.Bounds.Contains(Cursor.Position) && !flyout.CardBounds.Contains(Cursor.Position)) HideFlyout(false);
             }
         }
 
+        // Altera um campo, aplica e grava (menu de contexto)
+        private void Edit(Action<AppSettings> change)
+        {
+            AppSettings n;
+            lock (sLock) { n = S.Clone(); }
+            change(n);
+            ApplyInternal(n, true);
+        }
+
+        public void SavePosition()
+        {
+            try
+            {
+                using (RegistryKey key = Registry.CurrentUser.CreateSubKey(REG_KEY_APP))
+                {
+                    if (key != null)
+                    {
+                        key.SetValue("CustomX", this.Location.X);
+                        key.SetValue("CustomY", this.Location.Y);
+                        key.SetValue("CustomPos", 1);
+                    }
+                }
+            }
+            catch { }
+        }
+
+        private bool customPos = false;
+        private Point savedPos = new Point(0, 0);
+
+        // Posição automática: encostado à esquerda da área de notificação e centralizado na vertical da barra de tarefas.
+        private Point AutoAnchor()
+        {
+            Screen primary = Screen.PrimaryScreen;
+            float sc = GetDpi() / 96f;
+            int posX = primary.Bounds.Width - 360 - curW;
+            int posY = primary.WorkingArea.Bottom + (primary.Bounds.Height - primary.WorkingArea.Bottom - curH) / 2;
+            IntPtr trayWnd = FindWindow("Shell_TrayWnd", null);
+            if (trayWnd != IntPtr.Zero)
+            {
+                RECT tr;
+                if (GetWindowRect(trayWnd, out tr) && tr.Bottom > tr.Top) posY = tr.Top + ((tr.Bottom - tr.Top) - curH) / 2;
+                IntPtr notifyWnd = FindWindowEx(trayWnd, IntPtr.Zero, "TrayNotifyWnd", null);
+                RECT nr;
+                if (notifyWnd != IntPtr.Zero && GetWindowRect(notifyWnd, out nr) && nr.Right > nr.Left)
+                    posX = nr.Left - curW - (int)Math.Round(8 * sc);
+            }
+            return new Point(posX, posY);
+        }
+
+        private void LoadSavedPos()
+        {
+            customPos = false;
+            try
+            {
+                using (RegistryKey key = Registry.CurrentUser.OpenSubKey(REG_KEY_APP))
+                {
+                    if (key != null && key.GetValue("CustomPos") != null && Convert.ToInt32(key.GetValue("CustomPos")) == 1
+                        && key.GetValue("CustomX") != null && key.GetValue("CustomY") != null)
+                    {
+                        savedPos = new Point(Convert.ToInt32(key.GetValue("CustomX")), Convert.ToInt32(key.GetValue("CustomY")));
+                        customPos = true;
+                    }
+                }
+            }
+            catch { }
+        }
+
+        public void ClearSavedPos()
+        {
+            customPos = false;
+            try
+            {
+                using (RegistryKey key = Registry.CurrentUser.CreateSubKey(REG_KEY_APP))
+                {
+                    if (key != null)
+                    {
+                        key.DeleteValue("CustomX", false);
+                        key.DeleteValue("CustomY", false);
+                        key.DeleteValue("CustomPos", false);
+                    }
+                }
+            }
+            catch { }
+        }
+
+        public void PositionWidget(bool forceReset = false)
+        {
+            if (forceReset) ClearSavedPos(); else LoadSavedPos();
+            Point p = customPos ? savedPos : AutoAnchor();
+
+            // Proteção estrita multi-monitor
+            Screen target = Screen.FromPoint(p);
+            if (target == null) target = Screen.PrimaryScreen;
+            int posX = Math.Max(target.Bounds.Left, Math.Min(p.X, target.Bounds.Right - curW));
+            int posY = Math.Max(target.Bounds.Top, Math.Min(p.Y, target.Bounds.Bottom - curH));
+
+            this.Location = new Point(posX, posY);
+            SetWindowPos(this.Handle, HWND_TOPMOST, posX, posY, curW, curH, SWP_NOACTIVATE | SWP_SHOWWINDOW);
+            RenderWidget();
+        }
+
+        // ------------------------------------------------------------------ medição
+        private void UpdateTraffic()
+        {
+            if (cachedNic == null || cachedNic.OperationalStatus != OperationalStatus.Up)
+            {
+                cachedNic = GetTargetNic();
+            }
+
+            if (cachedNic == null)
+            {
+                if (liveUpBits != 0 || liveDownBits != 0) { liveUpBits = 0; liveDownBits = 0; }
+                RenderIfChanged();
+                return;
+            }
+
+            try
+            {
+                var stats = cachedNic.GetIPv4Statistics();
+                long currentIn = stats.BytesReceived;
+                long currentOut = stats.BytesSent;
+                DateTime now = DateTime.UtcNow;
+
+                if (lastBytesIn >= 0 && lastMeasurementTime != DateTime.MinValue)
+                {
+                    double elapsed = (now - lastMeasurementTime).TotalSeconds;
+                    if (elapsed > 0.1)
+                    {
+                        long diffIn = currentIn - lastBytesIn;
+                        long diffOut = currentOut - lastBytesOut;
+                        if (diffIn < 0) diffIn = 0;
+                        if (diffOut < 0) diffOut = 0;
+
+                        liveDownBits = (diffIn * 8.0) / elapsed;
+                        liveUpBits = (diffOut * 8.0) / elapsed;
+                        physRxBytes = diffIn / elapsed;
+                        physTxBytes = diffOut / elapsed;
+                        RenderIfChanged();
+                    }
+                }
+
+                lastBytesIn = currentIn;
+                lastBytesOut = currentOut;
+                lastMeasurementTime = now;
+            }
+            catch
+            {
+                cachedNic = null;
+            }
+        }
+
+        // Zero CPU quando nada muda: só redesenha se o texto exibido mudou
+        private void RenderIfChanged()
+        {
+            string k = RenderKey();
+            if (k != lastRenderKey) RenderWidget();
+        }
+
+        // ------------------------------------------------------------------ mouse
+        private void NetMonitorApp_MouseDown(object sender, MouseEventArgs e)
+        {
+            if (e.Button != MouseButtons.Left) return;
+            HideFlyoutIfNotPinned();
+            Point start = Cursor.Position;
+            Point startLoc = this.Location;
+            if (!S.LockPosition)
+            {
+                ReleaseCapture();
+                SendMessage(this.Handle, WM_NCLBUTTONDOWN, HT_CAPTION, 0);
+                Screen scr = Screen.FromControl(this);
+                if (scr != null)
+                {
+                    Rectangle b = scr.Bounds;
+                    int clX = Math.Max(b.Left, Math.Min(this.Left, b.Right - curW));
+                    int clY = Math.Max(b.Top, Math.Min(this.Top, b.Bottom - curH));
+                    if (clX != this.Left || clY != this.Top) this.Location = new Point(clX, clY);
+                }
+                if (this.Location != startLoc) { customPos = true; SavePosition(); }
+            }
+            Point end = Cursor.Position;
+            // clique sem arrastar: alterna o flyout entre "ao passar o mouse" e "fixado aberto"
+            if (Math.Abs(end.X - start.X) < 4 && Math.Abs(end.Y - start.Y) < 4)
+                Edit(delegate(AppSettings n) { n.FlyoutPinned = !n.FlyoutPinned; });
+        }
+
+        private void NetMonitorApp_MouseUp(object sender, MouseEventArgs e)
+        {
+            if (e.Button == MouseButtons.Right)
+            {
+                HideFlyoutIfNotPinned();
+                BuildContextMenu();
+                Screen scr = Screen.FromControl(this);
+                if (scr == null) scr = Screen.PrimaryScreen;
+                Rectangle b = scr.Bounds;
+
+                Size pref = contextMenu.PreferredSize;
+                int mnuW = pref.Width > 0 ? pref.Width : 240;
+                int mnuH = pref.Height > 0 ? pref.Height : 360;
+
+                int x = this.Left;
+                if (x + mnuW > b.Right - 4) x = b.Right - mnuW - 4;
+                if (x < b.Left + 4) x = b.Left + 4;
+                int y = this.Top - mnuH - 2;
+                if (y < b.Top + 4) y = this.Bottom + 2;
+                contextMenu.Show(x, y);
+            }
+        }
+
+        // ------------------------------------------------------------------ flyout
+        private void OnWidgetMouseEnter(object sender, EventArgs e)
+        {
+            if (settingsOpen || isScreensaverRunning || isSessionLocked) return;
+            if (contextMenu != null && contextMenu.Visible) return;
+            ShowFlyout();
+        }
+
+        private void OnWidgetMouseLeave(object sender, EventArgs e)
+        {
+            if (hoverCheckTimer != null && !hoverCheckTimer.Enabled) hoverCheckTimer.Start();
+        }
+
+        private void ShowFlyout()
+        {
+            if (isScreensaverRunning || isSessionLocked || !S.FlyoutEnabled) return;
+            if (flyout == null || flyout.IsDisposed) flyout = new FlyoutForm(this);
+            bool wasVisible = flyout.Visible;
+            UpdateFlyout();
+            if (!wasVisible || flyout.IsHiding) flyout.ShowAnimated();
+
+            isHoverSampling = true;
+            lastProcessIo.Clear();
+            ThreadPool.QueueUserWorkItem(DoProcessSampleWork);
+            EnsureSampling();
+
+            if (hoverCheckTimer == null)
+            {
+                hoverCheckTimer = new Timer();
+                hoverCheckTimer.Interval = 200;
+                hoverCheckTimer.Tick += HoverCheckTimer_Tick;
+            }
+            hoverCheckTimer.Start();
+        }
+
+        private void UpdateFlyout()
+        {
+            if (flyout == null || flyout.IsDisposed) return;
+            AppSettings cur;
+            lock (sLock) { cur = S; }
+            flyout.SetData(cur, EffectiveDark, TopApps(), liveUpBits, liveDownBits, GetDpi());
+            PositionFlyout();
+        }
+
+        private void EnsureSampling()
+        {
+            if (processSampleTimer == null)
+            {
+                processSampleTimer = new Timer();
+                processSampleTimer.Interval = 1000;
+                processSampleTimer.Tick += (s, e) =>
+                {
+                    bool need = (flyout != null && flyout.Visible) || settingsSampling;
+                    if (need) ThreadPool.QueueUserWorkItem(DoProcessSampleWork);
+                    else { processSampleTimer.Stop(); isHoverSampling = false; lastProcessIo.Clear(); cachedProcessNames.Clear(); }
+                };
+            }
+            if (!processSampleTimer.Enabled) processSampleTimer.Start();
+            isHoverSampling = true;
+        }
+
+        private void HoverCheckTimer_Tick(object sender, EventArgs e)
+        {
+            if (!S.FlyoutEnabled) { HideFlyout(true); return; }
+            if (S.FlyoutPinned) { if (flyout == null || !flyout.Visible) ShowFlyout(); return; }
+            Point cursor = Cursor.Position;
+            bool overWidget = this.Visible && this.Bounds.Contains(cursor);
+            bool overFlyout = flyout != null && flyout.Visible && flyout.CardBounds.Contains(cursor);
+            if (!overWidget && !overFlyout) HideFlyout(false);
+        }
+
+        private void HideFlyoutIfNotPinned() { if (!S.FlyoutPinned) HideFlyout(false); }
+
+        private void HideFlyout(bool force)
+        {
+            if (S.FlyoutPinned && S.FlyoutEnabled && !force) return;
+            if (hoverCheckTimer != null) hoverCheckTimer.Stop();
+            if (flyout != null && flyout.Visible) flyout.HideAnimated();
+        }
+
+        private void PositionFlyout()
+        {
+            if (flyout == null || flyout.IsDisposed) return;
+            Screen scr = Screen.FromControl(this);
+            if (scr == null) scr = Screen.PrimaryScreen;
+            flyout.PlaceAbove(this.Bounds, scr.WorkingArea);
+        }
+
+        public void SetFlyoutMode(string mode) { Edit(delegate(AppSettings n) { n.FlyoutMode = mode; }); }
+
+        // ------------------------------------------------------------------ amostragem por processo
+        private static string CategoryFor(string name, string path)
+        {
+            string n = name.ToLowerInvariant();
+            switch (n)
+            {
+                case "chrome": case "msedge": case "firefox": case "brave": case "opera": case "vivaldi": return "Navegador";
+                case "spotify": return "Música";
+                case "discord": case "slack": case "telegram": case "whatsapp": case "zoom": case "teams": case "ms-teams": return "Voz e Chat";
+                case "steam": case "steamwebhelper": case "epicgameslauncher": case "battle.net": return "Jogos";
+                case "code": case "devenv": case "idea64": case "pycharm64": case "cursor": return "Editor";
+                case "onedrive": case "dropbox": case "googledrivefs": return "Nuvem";
+                case "svchost": return "Serviço do Windows";
+                case "qbittorrent": case "utorrent": return "Torrent";
+            }
+            try
+            {
+                if (!string.IsNullOrEmpty(path) && File.Exists(path))
+                {
+                    string d = FileVersionInfo.GetVersionInfo(path).FileDescription;
+                    if (!string.IsNullOrEmpty(d) && d.Length <= 22) return d;
+                }
+            }
+            catch { }
+            return "Aplicativo";
+        }
+
+        private string GetProcessPath(int pid)
+        {
+            IntPtr hProc = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid);
+            if (hProc == IntPtr.Zero) return null;
+            try
+            {
+                StringBuilder sb = new StringBuilder(520);
+                int size = sb.Capacity;
+                if (QueryFullProcessImageName(hProc, 0, sb, ref size) != 0) return sb.ToString();
+            }
+            finally { CloseHandle(hProc); }
+            return null;
+        }
+
+        private void DoProcessSampleWork(object state)
+        {
+            if (!isHoverSampling) return;
+            try
+            {
+                HashSet<int> activePids = GetActiveNetworkPids();
+                DateTime now = DateTime.UtcNow;
+                double elapsed = lastSampleAt == DateTime.MinValue ? 1.0 : Math.Max(0.2, (now - lastSampleAt).TotalSeconds);
+                lastSampleAt = now;
+                double physRx = physRxBytes, physTx = physTxBytes;
+
+                Dictionary<string, ulong> appTx = new Dictionary<string, ulong>(StringComparer.OrdinalIgnoreCase);
+                Dictionary<string, ulong> appRx = new Dictionary<string, ulong>(StringComparer.OrdinalIgnoreCase);
+                Dictionary<string, int> appPid = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+
+                foreach (int pid in activePids)
+                {
+                    IntPtr hProc = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid);
+                    if (hProc == IntPtr.Zero) continue;
+                    try
+                    {
+                        IO_COUNTERS c;
+                        if (!GetProcessIoCounters(hProc, out c)) continue;
+                        IoSnap cur = new IoSnap { R = c.ReadTransferCount, W = c.WriteTransferCount };
+                        IoSnap last;
+                        if (lastProcessIo.TryGetValue(pid, out last))
+                        {
+                            ulong dr = cur.R >= last.R ? (ulong)((cur.R - last.R) / elapsed) : 0;
+                            ulong dw = cur.W >= last.W ? (ulong)((cur.W - last.W) / elapsed) : 0;
+                            // Isolamento de I/O de disco: um processo não transfere pela rede mais que a placa mediu.
+                            ulong capR = (ulong)(physRx * 1.2) + 4096, capW = (ulong)(physTx * 1.2) + 4096;
+                            if (dr > capR) dr = physRx > 100 ? (ulong)physRx : 0;
+                            if (dw > capW) dw = physTx > 100 ? (ulong)physTx : 0;
+                            if (dr > 0 || dw > 0)
+                            {
+                                string baseName = GetProcessName(pid);
+                                if (baseName.EndsWith(".exe", StringComparison.OrdinalIgnoreCase)) baseName = baseName.Substring(0, baseName.Length - 4);
+                                if (!appTx.ContainsKey(baseName)) { appTx[baseName] = 0; appRx[baseName] = 0; appPid[baseName] = pid; }
+                                appTx[baseName] += dw;
+                                appRx[baseName] += dr;
+                            }
+                        }
+                        lastProcessIo[pid] = cur;
+                    }
+                    finally { CloseHandle(hProc); }
+                }
+
+                if (lastProcessIo.Count > 100)
+                {
+                    List<int> rm = new List<int>();
+                    foreach (int k in lastProcessIo.Keys) if (!activePids.Contains(k)) rm.Add(k);
+                    for (int i = 0; i < rm.Count; i++) lastProcessIo.Remove(rm[i]);
+                }
+
+                // Normalização coletiva por direção
+                Normalize(appTx, physTx);
+                Normalize(appRx, physRx);
+
+                List<ProcessTrafficItem> items = new List<ProcessTrafficItem>();
+                foreach (var kv in appTx)
+                {
+                    ulong tx = kv.Value, rx = appRx[kv.Key];
+                    if (tx == 0 && rx == 0) continue;
+                    string sub;
+                    if (!subCache.TryGetValue(kv.Key, out sub)) { sub = CategoryFor(kv.Key, GetProcessPath(appPid[kv.Key])); subCache[kv.Key] = sub; }
+                    items.Add(new ProcessTrafficItem { Pid = appPid[kv.Key], Name = kv.Key, Sub = sub, TxBytes = tx, RxBytes = rx });
+                }
+                items.Sort((a, b) => b.Total.CompareTo(a.Total));
+                if (items.Count > 5) items.RemoveRange(5, items.Count - 5);
+
+                lock (topLock) { latestTop = items; }
+                if (this.IsHandleCreated && flyout != null && flyout.Visible)
+                    this.BeginInvoke((MethodInvoker)delegate { UpdateFlyout(); });
+            }
+            catch { }
+        }
+
+        private static void Normalize(Dictionary<string, ulong> d, double phys)
+        {
+            ulong total = 0;
+            foreach (var v in d.Values) total += v;
+            ulong max = (ulong)(phys * 1.25) + 8192;
+            if (total > max && total > 0 && phys > 0)
+            {
+                double scale = phys / (double)total;
+                List<string> keys = new List<string>(d.Keys);
+                foreach (string k in keys) d[k] = (ulong)(d[k] * scale);
+            }
+        }
+
+        // ------------------------------------------------------------------ menu de contexto
+        private string L(string pt, string en) { return currentLanguage == "pt" ? pt : en; }
+
+        private void BuildContextMenu()
+        {
+            bool isDark = EffectiveDark;
+            if (contextMenu != null) { try { contextMenu.Dispose(); } catch { } }
+            contextMenu = new ContextMenuStrip();
+            contextMenu.Opening += (s, e) => { HideFlyoutIfNotPinned(); };
+            contextMenu.Renderer = new Windows11MenuRenderer(isDark);
+            contextMenu.ShowCheckMargin = true;
+            contextMenu.ShowImageMargin = false;
+            Font menuFont = new Font(WidgetRenderer.FontInstalled("Segoe UI Variable Text") ? "Segoe UI Variable Text" : "Segoe UI", 10f);
+            contextMenu.Font = menuFont;
+            contextMenu.Padding = new Padding(4, 6, 4, 6);
+            contextMenu.Opened += (s, e) => Windows11MenuRenderer.StyleDropDown(contextMenu, isDark);
+            AppSettings c;
+            lock (sLock) { c = S; }
+
+            if (this.trayIcon != null) this.trayIcon.ContextMenuStrip = this.contextMenu;
+            bool bytes = c.UnitBase == "bytes";
+
+            // Seções com título, como no design: as escolhas frequentes ficam a um clique
+            contextMenu.Items.Add(Header(L("UNIDADE", "UNIT"), menuFont));
+            contextMenu.Items.Add(Check(L("Mbps · megabits (padrão)", "Mbps · megabits (default)"), !bytes, delegate(AppSettings n) { n.UnitBase = "bits"; }));
+            contextMenu.Items.Add(Check(L("MB/s · megabytes", "MB/s · megabytes"), bytes, delegate(AppSettings n) { n.UnitBase = "bytes"; }));
+            contextMenu.Items.Add(new ToolStripSeparator());
+            contextMenu.Items.Add(Header(L("ESCALA", "SCALE"), menuFont));
+            contextMenu.Items.Add(Check(L("Automática", "Automatic"), c.ScaleMode == "auto", delegate(AppSettings n) { n.ScaleMode = "auto"; }));
+            contextMenu.Items.Add(Check(L("Fixa em ", "Fixed in ") + (bytes ? "MB/s" : "Mbps"), c.ScaleMode == "mb", delegate(AppSettings n) { n.ScaleMode = "mb"; }));
+            contextMenu.Items.Add(Check(L("Fixa em ", "Fixed in ") + (bytes ? "KB/s" : "Kbps"), c.ScaleMode == "kb", delegate(AppSettings n) { n.ScaleMode = "kb"; }));
+            contextMenu.Items.Add(Check(L("Individual (TX e RX)", "Individual (TX and RX)"), c.ScaleMode == "individual", delegate(AppSettings n) { n.ScaleMode = "individual"; }));
+            contextMenu.Items.Add(new ToolStripSeparator());
+            contextMenu.Items.Add(Header("FLYOUT", menuFont));
+            contextMenu.Items.Add(Check(L("Ativado", "Enabled"), c.FlyoutEnabled, delegate(AppSettings n) { n.FlyoutEnabled = !n.FlyoutEnabled; }));
+            if (c.FlyoutEnabled)
+            {
+                contextMenu.Items.Add(Check(L("Abrir ao passar o mouse", "Open on hover"), !c.FlyoutPinned, delegate(AppSettings n) { n.FlyoutPinned = false; }));
+                // clicar de novo em "Fixado aberto" desfixa
+                contextMenu.Items.Add(Check(L("Fixado aberto", "Pinned open"), c.FlyoutPinned, delegate(AppSettings n) { n.FlyoutPinned = !n.FlyoutPinned; }));
+            }
+
+            // o que se usa raramente fica em "Mais opções"
+            ToolStripMenuItem more = new ToolStripMenuItem(L("Mais opções", "More options"));
+            ConfigureSubmenu(more);
+            ToolStripMenuItem mnuAdapters = new ToolStripMenuItem(L("Placa de rede", "Network adapter"));
+            ConfigureSubmenu(mnuAdapters);
+            PopulateAdaptersMenu(mnuAdapters);
+            more.DropDownItems.Add(mnuAdapters);
+            ToolStripMenuItem mnuArrows = new ToolStripMenuItem(L("Posição das setas", "Arrow position"));
+            ConfigureSubmenu(mnuArrows);
+            mnuArrows.DropDownItems.Add(Check(L("À esquerda (▲ 823 Kbps)", "Left (▲ 823 Kbps)"), c.ArrowPosition == "left", delegate(AppSettings n) { n.ArrowPosition = "left"; }));
+            mnuArrows.DropDownItems.Add(Check(L("À direita (823 Kbps ▲)", "Right (823 Kbps ▲)"), c.ArrowPosition == "right", delegate(AppSettings n) { n.ArrowPosition = "right"; }));
+            mnuArrows.DropDownItems.Add(Check(L("Sem setas", "No arrows"), c.ArrowPosition == "none", delegate(AppSettings n) { n.ArrowPosition = "none"; }));
+            more.DropDownItems.Add(mnuArrows);
+            ToolStripMenuItem mnuLang = new ToolStripMenuItem(L("Idioma do menu", "Menu language"));
+            ConfigureSubmenu(mnuLang);
+            mnuLang.DropDownItems.Add(Check("Português (Brasil)", c.Language == "pt", delegate(AppSettings n) { n.Language = "pt"; }));
+            mnuLang.DropDownItems.Add(Check("English (United States)", c.Language != "pt", delegate(AppSettings n) { n.Language = "en"; }));
+            more.DropDownItems.Add(mnuLang);
+            more.DropDownItems.Add(new ToolStripSeparator());
+            more.DropDownItems.Add(Check(L("Flyout: upload e download separados", "Flyout: separate upload and download"), c.FlyoutMode != "combined", delegate(AppSettings n) { n.FlyoutMode = c.FlyoutMode == "combined" ? "separated" : "combined"; }));
+            more.DropDownItems.Add(Check(L("Travar posição", "Lock position"), c.LockPosition, delegate(AppSettings n) { n.LockPosition = !n.LockPosition; }));
+            more.DropDownItems.Add(Check(L("Iniciar com o Windows", "Start with Windows"), c.StartWithWindows, delegate(AppSettings n) { n.StartWithWindows = !n.StartWithWindows; }));
+            ToolStripMenuItem mnuReset = new ToolStripMenuItem(L("Redefinir posição", "Reset position"));
+            mnuReset.Click += (s, e) => PositionWidget(true);
+            more.DropDownItems.Add(mnuReset);
+            contextMenu.Items.Add(more);
+
+            contextMenu.Items.Add(new ToolStripSeparator());
+            ToolStripMenuItem mnuSettings = new ToolStripMenuItem(L("Configurações...", "Settings..."));
+            mnuSettings.Font = new Font(menuFont, FontStyle.Bold);
+            mnuSettings.Click += (s, e) => OpenSettingsDialog("cores");
+            contextMenu.Items.Add(mnuSettings);
+            ToolStripMenuItem mnuAbout = new ToolStripMenuItem(L("Sobre o NetMonitor...", "About NetMonitor..."));
+            mnuAbout.Click += (s, e) => OpenSettingsDialog("sobre");
+            contextMenu.Items.Add(mnuAbout);
+            ToolStripMenuItem mnuExit = new ToolStripMenuItem(L("Sair", "Exit"));
+            mnuExit.Click += (s, e) =>
+            {
+                try { HideFlyout(true); this.Close(); }
+                catch { Environment.Exit(0); }
+            };
+            contextMenu.Items.Add(mnuExit);
+            StyleItems(contextMenu.Items, menuFont, isDark);
+        }
+
+        // Altura confortável, mesma fonte e mesmo visual (cantos/borda) em todos os submenus
+        private void StyleItems(ToolStripItemCollection items, Font f, bool dark)
+        {
+            foreach (ToolStripItem it in items)
+            {
+                ToolStripMenuItem mi = it as ToolStripMenuItem;
+                if (mi == null) continue;
+                mi.Padding = new Padding(4, 5, 4, 5);
+                if (mi.HasDropDownItems)
+                {
+                    ToolStripDropDown dd = mi.DropDown;
+                    dd.Font = f;
+                    dd.Renderer = contextMenu.Renderer;
+                    dd.Padding = new Padding(4, 6, 4, 6);
+                    dd.Opened += (s, e) => Windows11MenuRenderer.StyleDropDown(dd, dark);
+                    StyleItems(mi.DropDownItems, f, dark);
+                }
+            }
+        }
+
+        // Título de seção (não clicável), em versalete pequeno e cor secundária
+        private static ToolStripMenuItem Header(string text, Font baseFont)
+        {
+            ToolStripMenuItem h = new ToolStripMenuItem(text);
+            h.Enabled = false;
+            h.Font = new Font(baseFont.FontFamily, 7.5f, FontStyle.Bold);
+            return h;
+        }
+
+        private ToolStripMenuItem Check(string text, bool on, Action<AppSettings> change)
+        {
+            ToolStripMenuItem it = new ToolStripMenuItem(text);
+            it.Checked = on;
+            it.Click += (s, e) => Edit(change);
+            return it;
+        }
+
+        private void ConfigureSubmenu(ToolStripMenuItem parent)
+        {
+            parent.DropDown.DropShadowEnabled = true;
+            parent.DropDownOpening += (s, e) =>
+            {
+                Screen scr = Screen.FromControl(this);
+                if (contextMenu.Right + parent.DropDown.Width > scr.WorkingArea.Right) parent.DropDownDirection = ToolStripDropDownDirection.Left;
+                else parent.DropDownDirection = ToolStripDropDownDirection.Right;
+            };
+        }
+
+        private void PopulateAdaptersMenu(ToolStripMenuItem parent)
+        {
+            parent.DropDownItems.Clear();
+            ToolStripMenuItem itmAuto = new ToolStripMenuItem(L("Automático (Maior Tráfego)", "Auto (Highest Traffic)"));
+            itmAuto.Checked = string.Equals(selectedNicId, "Auto", StringComparison.OrdinalIgnoreCase);
+            itmAuto.Click += (s, e) => SelectAdapter("Auto");
+            parent.DropDownItems.Add(itmAuto);
+            parent.DropDownItems.Add(new ToolStripSeparator());
+
+            foreach (var nic in NetworkInterface.GetAllNetworkInterfaces())
+            {
+                if (nic.NetworkInterfaceType == NetworkInterfaceType.Loopback || nic.NetworkInterfaceType == NetworkInterfaceType.Tunnel) continue;
+                string id = nic.Id;
+                string name = string.Format("{0} ({1})", nic.Name, nic.Description);
+                if (name.Length > 45) name = name.Substring(0, 42) + "...";
+                ToolStripMenuItem itm = new ToolStripMenuItem(name);
+                itm.Checked = (selectedNicId == id || selectedNicId == nic.Name);
+                itm.Click += (s, e) => SelectAdapter(id);
+                parent.DropDownItems.Add(itm);
+            }
+        }
+
+        private void SelectAdapter(string id)
+        {
+            cachedNic = null; lastBytesIn = -1; lastBytesOut = -1;
+            Edit(delegate(AppSettings n) { n.Adapter = id; });
+            UpdateTraffic();
+        }
+
+        // ------------------------------------------------------------------ janela de configurações
+        // A janela roda em outro processo (NetMonitor.exe --settings): o WPF nunca entra neste processo
+        public void OpenSettingsDialog(string page)
+        {
+            settingsOpen = true;
+            HideFlyout(true);
+            Ipc.AllowSetForegroundWindow(-1);
+            if (settingsHwnd != IntPtr.Zero && Ipc.IsWindow(settingsHwnd))
+            {
+                Ipc.Send(settingsHwnd, Ipc.ShowPage, page, this.Handle);
+                return;
+            }
+            try { if (settingsProc != null && !settingsProc.HasExited) return; } catch { }
+            try
+            {
+                settingsProc = Process.Start(new ProcessStartInfo(Application.ExecutablePath,
+                    "--settings " + this.Handle.ToInt64().ToString(CultureInfo.InvariantCulture) + " " + page) { UseShellExecute = false });
+            }
+            catch { settingsOpen = false; }
+        }
+
+        private void OnIpc(int code, string text, IntPtr sender)
+        {
+            if (code == Ipc.ApplyLive || code == Ipc.ApplySave)
+            {
+                ApplyInternal(AppSettings.FromText(text), code == Ipc.ApplySave);
+            }
+            else if (code == Ipc.Hello)
+            {
+                long h;
+                settingsHwnd = long.TryParse(text, NumberStyles.Integer, CultureInfo.InvariantCulture, out h) ? new IntPtr(h) : sender;
+                settingsOpen = true;
+                PushData();
+            }
+            else if (code == Ipc.Bye) SettingsGone();
+            else if (code == Ipc.Sampling)
+            {
+                settingsSampling = text == "1";
+                if (settingsSampling) { EnsureSampling(); ThreadPool.QueueUserWorkItem(DoProcessSampleWork); }
+            }
+            else if (code == Ipc.Refresh) ThreadPool.QueueUserWorkItem(DoProcessSampleWork);
+        }
+
+        private void SettingsGone()
+        {
+            settingsHwnd = IntPtr.Zero;
+            settingsOpen = false;
+            settingsSampling = false;
+            if (S.FlyoutPinned) ShowFlyout();
+        }
+
+        // Envia à janela de Configurações as velocidades, o consumo deste processo e o top 5
+        private void PushData()
+        {
+            if (settingsHwnd == IntPtr.Zero)
+            {
+                // a janela não chegou a abrir (ou caiu antes de se apresentar)
+                try { if (settingsOpen && (settingsProc == null || settingsProc.HasExited)) settingsOpen = false; } catch { settingsOpen = false; }
+                return;
+            }
+            if (!Ipc.IsWindow(settingsHwnd)) { SettingsGone(); return; }
+            Ipc.Send(settingsHwnd, Ipc.Data, BuildDataText(), this.Handle);
+        }
+
+        private string BuildDataText()
+        {
+            double cpu, ram;
+            PerfInfo(out cpu, out ram);
+            CultureInfo inv = CultureInfo.InvariantCulture;
+            StringBuilder sb = new StringBuilder();
+            sb.Append("up=").Append(liveUpBits.ToString("R", inv)).Append('\n');
+            sb.Append("dn=").Append(liveDownBits.ToString("R", inv)).Append('\n');
+            sb.Append("cpu=").Append(cpu.ToString("R", inv)).Append('\n');
+            sb.Append("ram=").Append(ram.ToString("R", inv)).Append('\n');
+            foreach (ProcessTrafficItem it in TopApps())
+                sb.Append("app=").Append(it.Name.Replace('\t', ' ')).Append('\t').Append((it.Sub ?? "").Replace('\t', ' '))
+                  .Append('\t').Append(it.TxBytes).Append('\t').Append(it.RxBytes).Append('\n');
+            return sb.ToString();
+        }
+
+        private void StartOpenSettingsListener()
+        {
+            try
+            {
+                EventWaitHandle ev = new EventWaitHandle(false, EventResetMode.AutoReset, OPEN_SETTINGS_EVENT);
+                Thread t = new Thread(delegate()
+                {
+                    while (true)
+                    {
+                        try { ev.WaitOne(); this.BeginInvoke((MethodInvoker)delegate { OpenSettingsDialog("cores"); }); }
+                        catch { break; }
+                    }
+                }) { IsBackground = true, Name = "NetMonitorOpenSettings" };
+                t.Start();
+            }
+            catch { }
+        }
+
+        // ------------------------------------------------------------------ dados para a janela de Configurações
+        public List<ProcessTrafficItem> TopApps() { lock (topLock) { return latestTop; } }
+
+        public void PerfInfo(out double cpuPct, out double ramMb)
+        {
+            lock (sLock)
+            {
+                Process p = Process.GetCurrentProcess();
+                TimeSpan t = p.TotalProcessorTime;
+                DateTime now = DateTime.UtcNow;
+                double el = (now - lastCpuAt).TotalSeconds;
+                cpuPct = (lastCpuAt == DateTime.MinValue || el <= 0) ? 0 : (t - lastCpu).TotalSeconds / el / Environment.ProcessorCount * 100.0;
+                lastCpu = t; lastCpuAt = now;
+                ramMb = p.WorkingSet64 / 1048576.0;
+            }
+        }
+
+        // ------------------------------------------------------------------ encerramento e entrada
         protected override void OnFormClosing(FormClosingEventArgs e)
         {
             try
@@ -2482,29 +1759,8 @@ namespace NetMonitor
                 if (updateTimer != null) { updateTimer.Stop(); updateTimer.Dispose(); }
                 if (hoverCheckTimer != null) { hoverCheckTimer.Stop(); hoverCheckTimer.Dispose(); }
                 if (processSampleTimer != null) { processSampleTimer.Stop(); processSampleTimer.Dispose(); }
-                if (flyoutForm != null) { flyoutForm.Dispose(); flyoutForm = null; }
-                if (trayIcon != null)
-                {
-                    trayIcon.Visible = false;
-                    trayIcon.Dispose();
-                }
-
-                if (brushNumUp != null) brushNumUp.Dispose();
-                if (brushNumDown != null) brushNumDown.Dispose();
-                if (brushUnitUp != null) brushUnitUp.Dispose();
-                if (brushUnitDown != null) brushUnitDown.Dispose();
-                if (brushArrowUp != null) brushArrowUp.Dispose();
-                if (brushArrowDown != null) brushArrowDown.Dispose();
-                if (penArrowUp != null) penArrowUp.Dispose();
-                if (penArrowDown != null) penArrowDown.Dispose();
-
-                if (fontNum != null) fontNum.Dispose();
-                if (fontUnit != null) fontUnit.Dispose();
-                if (fontUnicode != null) fontUnicode.Dispose();
-
-                if (sfRight != null) sfRight.Dispose();
-                if (sfLeft != null) sfLeft.Dispose();
-                if (sfCenter != null) sfCenter.Dispose();
+                if (flyout != null) { flyout.Dispose(); flyout = null; }
+                if (trayIcon != null) { trayIcon.Visible = false; trayIcon.Dispose(); }
             }
             catch { }
             base.OnFormClosing(e);
@@ -2512,33 +1768,37 @@ namespace NetMonitor
 
         private static Mutex singleInstanceMutex = null;
 
-        [STAThread]
-        public static void Main()
+        // Método separado: só o processo da janela carrega (e compila) o código WPF
+        [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+        private static void RunSettings(string[] args)
         {
-            bool createdNew = false;
-            try
-            {
-                singleInstanceMutex = new Mutex(true, "NetMonitor_SingleInstance_Mutex_EduardoNoe", out createdNew);
-            }
-            catch
-            {
-                createdNew = false;
-            }
+            try { Ui.SettingsProcess.Run(args); }
+            catch (Exception ex) { Ui.K.Log(ex); }
+        }
 
-            if (!createdNew)
+        [STAThread]
+        public static void Main(string[] args)
+        {
+            if (args.Length > 0 && args[0] == "--settings")
             {
-                // Instância prévia já ativa: encerra para evitar duplicidade
+                try { SetProcessDpiAwareness(2); } catch { }
+                RunSettings(args);
                 return;
             }
 
-            try
+            bool createdNew = false;
+            try { singleInstanceMutex = new Mutex(true, "NetMonitor_SingleInstance_Mutex_EduardoNoe", out createdNew); }
+            catch { createdNew = false; }
+
+            if (!createdNew)
             {
-                SetProcessDpiAwareness(2);
+                // Já existe uma instância: pede para ela abrir as configurações.
+                try { EventWaitHandle.OpenExisting(OPEN_SETTINGS_EVENT).Set(); } catch { }
+                return;
             }
-            catch
-            {
-                try { SetProcessDPIAware(); } catch { }
-            }
+
+            try { SetProcessDpiAwareness(2); }
+            catch { try { SetProcessDPIAware(); } catch { } }
 
             try
             {
@@ -2550,10 +1810,7 @@ namespace NetMonitor
 
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
-            try
-            {
-                Application.Run(new NetMonitorApp());
-            }
+            try { Application.Run(new NetMonitorApp()); }
             finally
             {
                 if (singleInstanceMutex != null)
@@ -2566,35 +1823,95 @@ namespace NetMonitor
     }
 
     // ==============================================================================
-    // CARD FLUTUANTE MODERNO WINDOWS 11: TOP 5 PROGRAMAS POR TRÁFEGO DE REDE
+    // JANELA EM CAMADAS: apresenta um bitmap ARGB pré-multiplicado com alpha por pixel
     // ==============================================================================
-    public class ProcessTrafficItem
+    public static class LayeredWindow
     {
-        public int Pid;
-        public string Name;
-        public ulong DeltaBytes;
-        public string SpeedText;
+        [StructLayout(LayoutKind.Sequential)] struct PT { public int x, y; }
+        [StructLayout(LayoutKind.Sequential)] struct SZ { public int cx, cy; }
+        [StructLayout(LayoutKind.Sequential, Pack = 1)] struct BLEND { public byte BlendOp, BlendFlags, SourceConstantAlpha, AlphaFormat; }
+        [StructLayout(LayoutKind.Sequential)]
+        struct BMIH
+        {
+            public uint biSize; public int biWidth, biHeight; public ushort biPlanes, biBitCount;
+            public uint biCompression, biSizeImage; public int biXPelsPerMeter, biYPelsPerMeter; public uint biClrUsed, biClrImportant;
+        }
+
+        [DllImport("user32.dll", SetLastError = true)] static extern bool UpdateLayeredWindow(IntPtr hwnd, IntPtr hdcDst, ref PT pptDst, ref SZ psize, IntPtr hdcSrc, ref PT pptSrc, int crKey, ref BLEND pblend, int dwFlags);
+        [DllImport("user32.dll")] static extern IntPtr GetDC(IntPtr hWnd);
+        [DllImport("user32.dll")] static extern int ReleaseDC(IntPtr hWnd, IntPtr hDC);
+        [DllImport("gdi32.dll")] static extern IntPtr CreateCompatibleDC(IntPtr hdc);
+        [DllImport("gdi32.dll")] static extern bool DeleteDC(IntPtr hdc);
+        [DllImport("gdi32.dll")] static extern IntPtr SelectObject(IntPtr hdc, IntPtr h);
+        [DllImport("gdi32.dll")] static extern bool DeleteObject(IntPtr h);
+        [DllImport("gdi32.dll")] static extern IntPtr CreateDIBSection(IntPtr hdc, ref BMIH pbmi, uint usage, out IntPtr bits, IntPtr hSection, uint offset);
+        [DllImport("kernel32.dll", EntryPoint = "RtlMoveMemory")] static extern void CopyMemory(IntPtr dest, IntPtr src, UIntPtr count);
+
+        public static void Present(IntPtr hwnd, Bitmap bmp, int x, int y, byte alpha)
+        {
+            IntPtr screen = GetDC(IntPtr.Zero);
+            IntPtr mem = CreateCompatibleDC(screen);
+            IntPtr hbmp = IntPtr.Zero, old = IntPtr.Zero;
+            try
+            {
+                BMIH h = new BMIH();
+                h.biSize = (uint)Marshal.SizeOf(typeof(BMIH));
+                h.biWidth = bmp.Width; h.biHeight = -bmp.Height; h.biPlanes = 1; h.biBitCount = 32;
+                IntPtr bits;
+                hbmp = CreateDIBSection(screen, ref h, 0, out bits, IntPtr.Zero, 0);
+                if (hbmp == IntPtr.Zero) return;
+                BitmapData bd = bmp.LockBits(new Rectangle(0, 0, bmp.Width, bmp.Height), ImageLockMode.ReadOnly, PixelFormat.Format32bppPArgb);
+                try { CopyMemory(bits, bd.Scan0, (UIntPtr)(uint)(bd.Stride * bmp.Height)); }
+                finally { bmp.UnlockBits(bd); }
+                old = SelectObject(mem, hbmp);
+
+                PT dst = new PT { x = x, y = y };
+                PT src = new PT { x = 0, y = 0 };
+                SZ sz = new SZ { cx = bmp.Width, cy = bmp.Height };
+                BLEND bf = new BLEND { BlendOp = 0, BlendFlags = 0, SourceConstantAlpha = alpha, AlphaFormat = 1 };
+                UpdateLayeredWindow(hwnd, screen, ref dst, ref sz, mem, ref src, 0, ref bf, 2);
+            }
+            finally
+            {
+                ReleaseDC(IntPtr.Zero, screen);
+                if (old != IntPtr.Zero) SelectObject(mem, old);
+                if (hbmp != IntPtr.Zero) DeleteObject(hbmp);
+                DeleteDC(mem);
+            }
+        }
     }
 
-    public class NetworkTopProcessesFlyout : Form
+    // ==============================================================================
+    // FLYOUT "TRÁFEGO DE REDE POR APP" (janela em camadas, animada, sem roubar o foco)
+    // ==============================================================================
+    public class FlyoutForm : Form
     {
+        private readonly NetMonitorApp app;
+        private Bitmap bmp;
+        private FlyoutHit hit = new FlyoutHit();
+        private int hoverRow = -1;
+        private float dpi = 96f;
+        private int margin = 18;
+        private AppSettings s = new AppSettings();
+        private bool dark = true;
         private List<ProcessTrafficItem> items = new List<ProcessTrafficItem>();
-        private bool isDark = true;
-        private string lang = "pt";
-        private int cornerPref = 2; // DWMWCP_ROUND
-        private object syncLock = new object();
+        private double up, dn;
+        private Point basePos = new Point(0, 0);
+        private byte alpha = 0;
+        private int offsetY = 0;
+        private Timer anim;
+        private DateTime animStart;
+        private bool animShow;
 
-        [DllImport("dwmapi.dll")]
-        private static extern int DwmSetWindowAttribute(IntPtr hwnd, int attr, ref int attrValue, int attrSize);
-
-        public NetworkTopProcessesFlyout()
+        public FlyoutForm(NetMonitorApp app)
         {
+            this.app = app;
             this.FormBorderStyle = FormBorderStyle.None;
             this.ShowInTaskbar = false;
             this.StartPosition = FormStartPosition.Manual;
-            this.Size = new Size(252, 172);
-            this.DoubleBuffered = true;
-            this.SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint | ControlStyles.OptimizedDoubleBuffer, true);
+            this.TopMost = true;
+            anim = new Timer { Interval = 15 };
+            anim.Tick += AnimTick;
         }
 
         protected override CreateParams CreateParams
@@ -2602,235 +1919,214 @@ namespace NetMonitor
             get
             {
                 CreateParams cp = base.CreateParams;
-                cp.ExStyle |= 0x00000080; // WS_EX_TOOLWINDOW
-                cp.ExStyle |= 0x08000000; // WS_EX_NOACTIVATE
-                cp.ExStyle |= 0x00000008; // WS_EX_TOPMOST
-                cp.ClassStyle |= 0x00020000; // CS_DROPSHADOW
+                cp.Style = unchecked((int)0x80000000);
+                cp.ExStyle |= 0x00080000 | 0x00000080 | 0x08000000 | 0x00000008; // LAYERED | TOOLWINDOW | NOACTIVATE | TOPMOST
                 return cp;
             }
         }
 
-        protected override void OnHandleCreated(EventArgs e)
+        protected override bool ShowWithoutActivation { get { return true; } }
+        protected override void OnPaintBackground(PaintEventArgs e) { }
+        protected override void OnPaint(PaintEventArgs e) { }
+
+        // retângulo do cartão (sem a margem da sombra), em coordenadas de tela
+        public Rectangle CardBounds
         {
-            base.OnHandleCreated(e);
-            try
-            {
-                DwmSetWindowAttribute(this.Handle, 33, ref cornerPref, sizeof(int));
-            }
-            catch { }
+            get { return new Rectangle(basePos.X + hit.Body.X, basePos.Y + hit.Body.Y, hit.Body.Width, hit.Body.Height); }
         }
 
-        public void ApplyTheme(bool dark, string language)
+        public void SetData(AppSettings settings, bool isDark, List<ProcessTrafficItem> list, double upBits, double dnBits, float dpiValue)
         {
-            this.isDark = dark;
-            this.lang = language;
-            this.BackColor = dark ? Color.FromArgb(30, 30, 30) : Color.FromArgb(255, 255, 255);
-            this.Invalidate();
+            s = settings; dark = isDark; items = list ?? new List<ProcessTrafficItem>(); up = upBits; dn = dnBits; dpi = dpiValue;
+            margin = (int)Math.Round(18 * dpi / 96f);
+            Redraw();
         }
 
-        public void UpdateItems(List<ProcessTrafficItem> newItems)
+        private void Redraw()
         {
-            lock (syncLock)
-            {
-                items = newItems ?? new List<ProcessTrafficItem>();
-            }
-            this.Invalidate();
+            IntPtr h = this.Handle;
+            Bitmap nb = FlyoutRenderer.Render(s, dark, items, up, dn, dpi, hoverRow, margin, out hit);
+            Bitmap old = bmp;
+            bmp = nb;
+            if (old != null) old.Dispose();
+            Present();
         }
 
-        protected override void OnPaint(PaintEventArgs e)
+        private void Present()
         {
-            base.OnPaint(e);
-            Graphics g = e.Graphics;
-            g.SmoothingMode = SmoothingMode.AntiAlias;
-            g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
+            if (bmp == null || !this.IsHandleCreated) return;
+            LayeredWindow.Present(this.Handle, bmp, basePos.X, basePos.Y + offsetY, alpha);
+        }
 
-            int w = this.ClientSize.Width;
-            int h = this.ClientSize.Height;
+        // Centraliza sobre o widget, acima dele (ou abaixo se não couber)
+        public void PlaceAbove(Rectangle widget, Rectangle work)
+        {
+            if (bmp == null) return;
+            int cardW = hit.Body.Width, cardH = hit.Body.Height;
+            int gap = (int)Math.Round(8 * dpi / 96f);
+            int cx = widget.Left + widget.Width / 2 - cardW / 2;
+            cx = Math.Max(work.Left + 6, Math.Min(work.Right - cardW - 6, cx));
+            int cy = widget.Top - cardH - gap;
+            if (cy < work.Top + 6) cy = widget.Bottom + gap;
+            basePos = new Point(cx - margin, cy - margin);
+            Present();
+        }
 
-            Color clrBorder = isDark ? Color.FromArgb(52, 52, 52) : Color.FromArgb(226, 226, 226);
-            Color clrHeader = isDark ? Color.FromArgb(150, 150, 150) : Color.FromArgb(110, 110, 110);
-            Color clrDiv = isDark ? Color.FromArgb(44, 44, 44) : Color.FromArgb(235, 235, 235);
-            Color clrTextMain = isDark ? Color.FromArgb(240, 240, 240) : Color.FromArgb(28, 28, 28);
-            Color clrTextMuted = isDark ? Color.FromArgb(120, 120, 120) : Color.FromArgb(145, 145, 145);
-            Color clrAccentSpeed = isDark ? Color.FromArgb(96, 205, 255) : Color.FromArgb(0, 103, 192);
-            Color clrTrack = isDark ? Color.FromArgb(42, 42, 42) : Color.FromArgb(240, 240, 240);
-            Color clrBar = isDark ? Color.FromArgb(0, 120, 212) : Color.FromArgb(0, 120, 212);
-            Color clrBarTop = isDark ? Color.FromArgb(0, 188, 249) : Color.FromArgb(0, 90, 180);
+        public bool IsHiding { get { return anim.Enabled && !animShow; } }
 
-            // Borda externa de 1px
-            using (Pen pBorder = new Pen(clrBorder, 1.0f))
+        public void ShowAnimated()
+        {
+            animShow = true; animStart = DateTime.UtcNow; alpha = 0; offsetY = (int)(8 * dpi / 96f);
+            if (!this.Visible) { this.Show(); }
+            SetWindowPos(this.Handle, new IntPtr(-1), 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0010 | 0x0040);
+            Present();
+            anim.Start();
+        }
+
+        public void HideAnimated()
+        {
+            animShow = false; animStart = DateTime.UtcNow;
+            anim.Start();
+        }
+
+        private void AnimTick(object sender, EventArgs e)
+        {
+            double ms = (DateTime.UtcNow - animStart).TotalMilliseconds;
+            double dur = animShow ? 280 : 160;
+            double t = Math.Min(1, ms / dur);
+            double ease = 1 - Math.Pow(1 - t, 4);                 // ~ cubic-bezier(0,0,0,1)
+            double v = animShow ? ease : 1 - ease;
+            alpha = (byte)(255 * v);
+            offsetY = (int)((8 * dpi / 96f) * (1 - v));
+            Present();
+            if (t >= 1)
             {
-                g.DrawRectangle(pBorder, 0, 0, w - 1, h - 1);
+                anim.Stop();
+                if (!animShow) { this.Hide(); hoverRow = -1; }
             }
+        }
 
-            // Cabeçalho
-            string headerText = (lang == "pt") ? "Top 5 Tráfego de Rede por App" : "Top 5 Network Usage by App";
-            using (SolidBrush brDot = new SolidBrush(clrAccentSpeed))
-            {
-                g.FillEllipse(brDot, 14, 11, 6, 6);
-            }
+        [DllImport("user32.dll")] private static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags);
 
-            using (Font fHead = new Font("Segoe UI", 7.5f, FontStyle.Bold))
-            using (SolidBrush brHead = new SolidBrush(clrHeader))
-            {
-                g.DrawString(headerText, fHead, brHead, 25, 8);
-            }
+        protected override void OnMouseMove(MouseEventArgs e)
+        {
+            base.OnMouseMove(e);
+            int h = -1;
+            for (int i = 0; i < hit.Rows.Count; i++) if (hit.Rows[i].Contains(e.Location)) { h = i; break; }
+            bool hand = hit.Separated.Contains(e.Location) || hit.Combined.Contains(e.Location) || hit.SettingsLink.Contains(e.Location);
+            this.Cursor = hand ? Cursors.Hand : Cursors.Default;
+            if (h != hoverRow) { hoverRow = h; Redraw(); }
+        }
 
-            // Linha divisória
-            using (Pen pDiv = new Pen(clrDiv, 1.0f))
-            {
-                g.DrawLine(pDiv, 14, 26, w - 14, 26);
-            }
+        protected override void OnMouseLeave(EventArgs e)
+        {
+            base.OnMouseLeave(e);
+            if (hoverRow != -1) { hoverRow = -1; Redraw(); }
+        }
 
-            List<ProcessTrafficItem> currentItems;
-            lock (syncLock)
-            {
-                currentItems = new List<ProcessTrafficItem>(items);
-            }
+        protected override void OnMouseDown(MouseEventArgs e)
+        {
+            base.OnMouseDown(e);
+            if (e.Button != MouseButtons.Left) return;
+            if (hit.Separated.Contains(e.Location)) app.SetFlyoutMode("separated");
+            else if (hit.Combined.Contains(e.Location)) app.SetFlyoutMode("combined");
+            else if (hit.SettingsLink.Contains(e.Location)) app.OpenSettingsDialog("geral");
+        }
 
-            if (currentItems.Count == 0)
-            {
-                string emptyText = (lang == "pt") ? "Aguardando atividade de rede..." : "Waiting for network activity...";
-                using (Font fEmpty = new Font("Segoe UI", 8.0f, FontStyle.Italic))
-                using (SolidBrush brEmpty = new SolidBrush(clrTextMuted))
-                using (StringFormat sfC = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center })
-                {
-                    g.DrawString(emptyText, fEmpty, brEmpty, new RectangleF(14, 30, w - 28, h - 36), sfC);
-                }
-                return;
-            }
-
-            ulong maxBytes = 1;
-            for (int i = 0; i < currentItems.Count; i++)
-            {
-                if (currentItems[i].DeltaBytes > maxBytes)
-                    maxBytes = currentItems[i].DeltaBytes;
-            }
-
-            int startY = 32;
-            int rowH = 26;
-            using (Font fRank = new Font("Segoe UI", 7.0f, FontStyle.Bold))
-            using (Font fName = new Font("Segoe UI", 8.0f, FontStyle.Regular))
-            using (Font fSpeed = new Font("Segoe UI", 8.0f, FontStyle.Bold))
-            using (SolidBrush brRank = new SolidBrush(clrTextMuted))
-            using (SolidBrush brName = new SolidBrush(clrTextMain))
-            using (SolidBrush brSpeed = new SolidBrush(clrAccentSpeed))
-            using (SolidBrush brTrack = new SolidBrush(clrTrack))
-            using (SolidBrush brFillTop = new SolidBrush(clrBarTop))
-            using (SolidBrush brFillSub = new SolidBrush(clrBar))
-            using (StringFormat sfRight = new StringFormat { Alignment = StringAlignment.Far, LineAlignment = StringAlignment.Near })
-            {
-                for (int i = 0; i < currentItems.Count && i < 5; i++)
-                {
-                    ProcessTrafficItem item = currentItems[i];
-                    int y = startY + (i * rowH);
-
-                    // Ranking: 1, 2, 3, 4, 5
-                    g.DrawString((i + 1).ToString(), fRank, brRank, 14, y);
-
-                    // Nome do aplicativo
-                    string displayName = item.Name;
-                    if (displayName.EndsWith(".exe", StringComparison.OrdinalIgnoreCase))
-                        displayName = displayName.Substring(0, displayName.Length - 4);
-                    if (displayName.Length > 20) displayName = displayName.Substring(0, 18) + "…";
-                    g.DrawString(displayName, fName, brName, 28, y - 1);
-
-                    // Velocidade à direita
-                    g.DrawString(item.SpeedText, fSpeed, brSpeed, w - 14, y - 1, sfRight);
-
-                    // Mini barra horizontal
-                    int barX = 28;
-                    int barY = y + 17;
-                    int barMaxW = w - 42;
-                    int barH = 2;
-
-                    g.FillRectangle(brTrack, barX, barY, barMaxW, barH);
-
-                    float ratio = (maxBytes > 0) ? (float)item.DeltaBytes / (float)maxBytes : 0f;
-                    int fillW = Math.Max(3, (int)(ratio * barMaxW));
-                    g.FillRectangle(i == 0 ? brFillTop : brFillSub, barX, barY, fillW, barH);
-                }
-            }
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing) { if (anim != null) anim.Dispose(); if (bmp != null) bmp.Dispose(); }
+            base.Dispose(disposing);
         }
     }
 
     // ==============================================================================
-    // RENDERIZADOR NATIVO DO WINDOWS 11 PARA MENUS DE CONTEXTO
+    // MEMÓRIA: devolve o working set ao Windows (classe separada para não carregar o WPF no início)
+    // ==============================================================================
+    public static class Mem
+    {
+        [DllImport("kernel32.dll")] static extern bool SetProcessWorkingSetSize(IntPtr proc, IntPtr min, IntPtr max);
+
+        public static void Trim()
+        {
+            try
+            {
+                GC.Collect();
+                GC.WaitForPendingFinalizers();
+                SetProcessWorkingSetSize(Process.GetCurrentProcess().Handle, (IntPtr)(-1), (IntPtr)(-1));
+            }
+            catch { }
+        }
+    }
+
+    // ==============================================================================
+    // MENU DE CONTEXTO: mesma paleta Ace Obsidian e ícones da marca usados na janela e no flyout
     // ==============================================================================
     public class Windows11MenuRenderer : ToolStripProfessionalRenderer
     {
-        private bool isDark;
+        private readonly bool isDark;
+        private readonly Tokens t;
 
         public Windows11MenuRenderer(bool isDark) : base(new Windows11ColorTable(isDark))
         {
             this.isDark = isDark;
+            this.t = Pal.For(isDark);
+            this.RoundedEdges = false;
         }
+
+        protected override void OnRenderToolStripBackground(ToolStripRenderEventArgs e)
+        {
+            using (SolidBrush b = new SolidBrush(WidgetRenderer.Hex(t.FlyoutBg, 255)))
+                e.Graphics.FillRectangle(b, e.AffectedBounds);
+        }
+
+        protected override void OnRenderToolStripBorder(ToolStripRenderEventArgs e)
+        {
+            // a borda e os cantos arredondados vêm do DWM (Windows 11)
+        }
+
+        protected override void OnRenderImageMargin(ToolStripRenderEventArgs e) { }
 
         protected override void OnRenderMenuItemBackground(ToolStripItemRenderEventArgs e)
         {
-            if (e.Item.Selected && e.Item.Enabled)
+            if (!e.Item.Selected || !e.Item.Enabled) return;
+            Rectangle r = new Rectangle(4, 1, e.Item.Width - 8, e.Item.Height - 2);
+            Color hover = isDark ? Color.FromArgb(22, 255, 255, 255) : Color.FromArgb(14, 0, 0, 0);
+            using (SolidBrush b = new SolidBrush(hover))
+            using (GraphicsPath path = CreateRoundedRectanglePath(r, 4))
             {
-                Rectangle r = new Rectangle(4, 1, e.Item.Width - 8, e.Item.Height - 2);
-                Color hoverBg = isDark ? Color.FromArgb(52, 52, 55) : Color.FromArgb(232, 232, 236);
-                using (SolidBrush b = new SolidBrush(hoverBg))
-                using (GraphicsPath path = CreateRoundedRectanglePath(r, 4))
-                {
-                    e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
-                    e.Graphics.FillPath(b, path);
-                }
-            }
-            else
-            {
-                base.OnRenderMenuItemBackground(e);
+                e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+                e.Graphics.FillPath(b, path);
             }
         }
 
         protected override void OnRenderItemText(ToolStripItemTextRenderEventArgs e)
         {
-            if (isDark)
-            {
-                e.TextColor = e.Item.Enabled ? Color.FromArgb(245, 245, 245) : Color.FromArgb(120, 120, 120);
-            }
-            else
-            {
-                e.TextColor = e.Item.Enabled ? Color.FromArgb(25, 25, 25) : Color.FromArgb(140, 140, 140);
-            }
+            e.TextColor = e.Item.Enabled ? WidgetRenderer.Hex(t.TextPri, 255) : WidgetRenderer.Hex(t.TextSec, 255);
+            e.TextFormat |= TextFormatFlags.VerticalCenter;
             base.OnRenderItemText(e);
         }
 
         protected override void OnRenderItemCheck(ToolStripItemImageRenderEventArgs e)
         {
+            // marca de seleção = ícone "acao-confirmar" da marca, sem caixa
             Rectangle r = e.ImageRectangle;
-            r.Inflate(-2, -2);
-            Color boxBg = Color.FromArgb(0, 120, 212);
-            using (SolidBrush b = new SolidBrush(boxBg))
-            {
-                e.Graphics.FillRectangle(b, r);
-            }
-
-            using (Pen p = new Pen(Color.White, 1.8f))
-            {
-                PointF pt1 = new PointF(r.Left + 3f, r.Top + r.Height * 0.48f);
-                PointF pt2 = new PointF(r.Left + r.Width * 0.4f, r.Bottom - 3.5f);
-                PointF pt3 = new PointF(r.Right - 3f, r.Top + 3.5f);
-                e.Graphics.DrawLines(p, new PointF[] { pt1, pt2, pt3 });
-            }
+            float size = Math.Min(r.Width, r.Height) + 2;
+            float x = r.Left + (r.Width - size) / 2f, y = r.Top + (r.Height - size) / 2f;
+            SvgPath.DrawIcon(e.Graphics, "acao-confirmar", x, y, size, WidgetRenderer.Hex(isDark ? "#60A5FA" : "#0066FF", 255));
         }
 
         protected override void OnRenderArrow(ToolStripArrowRenderEventArgs e)
         {
-            e.ArrowColor = isDark ? Color.FromArgb(190, 190, 190) : Color.FromArgb(80, 80, 80);
+            e.ArrowColor = WidgetRenderer.Hex(t.TextSec, 255);
             base.OnRenderArrow(e);
         }
 
         protected override void OnRenderSeparator(ToolStripSeparatorRenderEventArgs e)
         {
             int midY = e.Item.Height / 2;
-            Color sepColor = isDark ? Color.FromArgb(55, 55, 55) : Color.FromArgb(220, 220, 220);
-            using (Pen p = new Pen(sepColor))
-            {
-                e.Graphics.DrawLine(p, 26, midY, e.Item.Width - 6, midY);
-            }
+            using (Pen p = new Pen(isDark ? Color.FromArgb(26, 255, 255, 255) : Color.FromArgb(22, 0, 0, 0)))
+                e.Graphics.DrawLine(p, 10, midY, e.Item.Width - 10, midY);
         }
 
         public static GraphicsPath CreateRoundedRectanglePath(Rectangle r, int radius)
@@ -2844,2140 +2140,49 @@ namespace NetMonitor
             path.CloseFigure();
             return path;
         }
+
+        // Cantos arredondados e borda sutil do Windows 11 no menu e nos submenus
+        public static void StyleDropDown(ToolStripDropDown dd, bool dark)
+        {
+            try
+            {
+                int round = 2;
+                NetMonitorApp.DwmSetWindowAttribute(dd.Handle, 33, ref round, 4);
+                Color bc = dark ? Color.FromArgb(46, 52, 66) : Color.FromArgb(214, 222, 236);
+                int cref = bc.R | (bc.G << 8) | (bc.B << 16);
+                NetMonitorApp.DwmSetWindowAttribute(dd.Handle, 34, ref cref, 4);
+            }
+            catch { }
+        }
     }
 
     public class Windows11ColorTable : ProfessionalColorTable
     {
-        private bool isDark;
+        private readonly Color bg, sel;
 
         public Windows11ColorTable(bool isDark)
         {
-            this.isDark = isDark;
             this.UseSystemColors = false;
+            bg = WidgetRenderer.Hex(Pal.For(isDark).FlyoutBg, 255);
+            sel = isDark ? Color.FromArgb(40, 46, 58) : Color.FromArgb(236, 240, 247);
         }
 
-        public override Color ToolStripDropDownBackground { get { return isDark ? Color.FromArgb(32, 32, 32) : Color.FromArgb(250, 250, 250); } }
-        public override Color MenuBorder { get { return isDark ? Color.FromArgb(55, 55, 55) : Color.FromArgb(215, 215, 215); } }
+        public override Color ToolStripDropDownBackground { get { return bg; } }
+        public override Color MenuBorder { get { return bg; } }
         public override Color MenuItemBorder { get { return Color.Transparent; } }
-        public override Color MenuItemSelected { get { return isDark ? Color.FromArgb(50, 50, 50) : Color.FromArgb(235, 235, 235); } }
-        public override Color MenuItemSelectedGradientBegin { get { return isDark ? Color.FromArgb(50, 50, 50) : Color.FromArgb(235, 235, 235); } }
-        public override Color MenuItemSelectedGradientEnd { get { return isDark ? Color.FromArgb(50, 50, 50) : Color.FromArgb(235, 235, 235); } }
-        public override Color MenuItemPressedGradientBegin { get { return isDark ? Color.FromArgb(40, 40, 40) : Color.FromArgb(225, 225, 225); } }
-        public override Color MenuItemPressedGradientEnd { get { return isDark ? Color.FromArgb(40, 40, 40) : Color.FromArgb(225, 225, 225); } }
-        public override Color ImageMarginGradientBegin { get { return isDark ? Color.FromArgb(32, 32, 32) : Color.FromArgb(250, 250, 250); } }
-        public override Color ImageMarginGradientMiddle { get { return isDark ? Color.FromArgb(32, 32, 32) : Color.FromArgb(250, 250, 250); } }
-        public override Color ImageMarginGradientEnd { get { return isDark ? Color.FromArgb(32, 32, 32) : Color.FromArgb(250, 250, 250); } }
+        public override Color MenuItemSelected { get { return sel; } }
+        public override Color MenuItemSelectedGradientBegin { get { return sel; } }
+        public override Color MenuItemSelectedGradientEnd { get { return sel; } }
+        public override Color MenuItemPressedGradientBegin { get { return sel; } }
+        public override Color MenuItemPressedGradientEnd { get { return sel; } }
+        public override Color ImageMarginGradientBegin { get { return bg; } }
+        public override Color ImageMarginGradientMiddle { get { return bg; } }
+        public override Color ImageMarginGradientEnd { get { return bg; } }
         public override Color CheckBackground { get { return Color.Transparent; } }
         public override Color CheckSelectedBackground { get { return Color.Transparent; } }
         public override Color CheckPressedBackground { get { return Color.Transparent; } }
-        public override Color SeparatorDark { get { return isDark ? Color.FromArgb(55, 55, 55) : Color.FromArgb(220, 220, 220); } }
-        public override Color SeparatorLight { get { return Color.Transparent; } }
+        public override Color SeparatorDark { get { return bg; } }
+        public override Color SeparatorLight { get { return bg; } }
     }
 
-    // ==============================================================================
-    // PROPOSTA B: JANELA DE CONFIGURAÇÕES COM SIDEBAR LATERAL DO WINDOWS 11 (v1.0.0)
-    // ==============================================================================
-    public class SettingsForm : Form
-    {
-        public string SelectedLanguage { get; private set; }
-        public string SelectedSpeedUnitFormat { get; private set; }
-        public string SelectedUnitMode { get; private set; }
-        public bool SelectedArrowOnRight { get; private set; }
-        public bool SelectedIsLocked { get; private set; }
-        public bool SelectedHideOnScreensaver { get; private set; }
-        public bool SelectedShowHoverFlyout { get; private set; }
-        public bool SelectedFollowSystemTheme { get; private set; }
-        public string SelectedIconTemplate { get; private set; }
-        public string SelectedCustomUpChar { get; private set; }
-        public string SelectedCustomDownChar { get; private set; }
-
-        public string SelectedFontFamily { get; private set; }
-        public float SelectedFontSize { get; private set; }
-        public FontStyle SelectedFontStyle { get; private set; }
-
-        public string SelectedTextColorMode { get; private set; }
-        public Color SelectedTextColorUnified { get; private set; }
-        public Color SelectedTextColorUp { get; private set; }
-        public Color SelectedTextColorDown { get; private set; }
-
-        public string SelectedUnitColorMode { get; private set; }
-        public Color SelectedUnitColorUnified { get; private set; }
-        public Color SelectedUnitColorUp { get; private set; }
-        public Color SelectedUnitColorDown { get; private set; }
-
-        public string SelectedArrowColorMode { get; private set; }
-        public Color SelectedArrowColorUnified { get; private set; }
-        public Color SelectedArrowColorUp { get; private set; }
-        public Color SelectedArrowColorDown { get; private set; }
-
-        // Elementos da Interface
-        private NetMonitorApp parentApp;
-        private bool isDarkTheme;
-
-        // Painéis com posicionamento absoluto independente (sem sobreposição)
-        private Panel pnlSidebar;
-        private Panel pnlMainContent;
-        private Panel pnlBottom;
-
-        private Label lblHeaderTitle;
-        private Label lblHeaderSubtitle;
-
-        private Button btnNavGeral;
-        private Button btnNavFonte;
-        private Button btnNavCores;
-        private Button btnNavIcones;
-
-        private Panel pnlPageGeral;
-        private Panel pnlPageFonte;
-        private Panel pnlPageCores;
-        private Panel pnlPageIcones;
-
-        // Controles: Geral
-        private ComboBox cbLang;
-        private ComboBox cbFormat;
-        private ComboBox cbUnits;
-        private RadioButton rbRight;
-        private RadioButton rbLeft;
-        private CheckBox chkLock;
-        private CheckBox chkScreensaver;
-        private CheckBox chkHoverFlyout;
-
-        // Controles: Tipografia
-        private ComboBox cbFontFamily;
-        private ComboBox cbFontSize;
-        private ComboBox cbFontStyle;
-
-        // Controles: Cores
-        private RadioButton rbTextUnified;
-        private RadioButton rbTextIndividual;
-        private Button btnColorTextBoth;
-        private Button btnColorTextUp;
-        private Button btnColorTextDown;
-
-        private RadioButton rbUnitInherit;
-        private RadioButton rbUnitUnified;
-        private RadioButton rbUnitIndividual;
-        private Button btnColorUnitBoth;
-        private Button btnColorUnitUp;
-        private Button btnColorUnitDown;
-
-        private RadioButton rbArrowUnified;
-        private RadioButton rbArrowIndividual;
-        private Button btnColorArrowBoth;
-        private Button btnColorArrowUp;
-        private Button btnColorArrowDown;
-
-        // Presets de Cores
-        private Button btnPresetCiano;
-        private Button btnPresetClassico;
-        private Button btnPresetPadrao;
-        private Button btnPresetMono;
-        private int currentPageIndex = 0;
-
-        [DllImport("dwmapi.dll")]
-        private static extern int DwmSetWindowAttribute(IntPtr hwnd, int attr, ref int attrValue, int attrSize);
-
-        // Controles: Ícones
-        private ComboBox cbTemplate;
-        private TextBox txtUp;
-        private TextBox txtDown;
-        private Label lblUp;
-        private Label lblDown;
-
-        // Live Preview Box
-        private Panel pnlLivePreview;
-        private Label lblPrevTitle;
-        private Label lblPrevDesc;
-        private Button btnResetDefaults;
-        private Button btnSave;
-        private Button btnCancel;
-
-        // Bloco do Desenvolvedor
-        private Label lblDevTitle;
-        private LinkLabel lnkDev;
-        private LinkLabel lnkContact;
-
-        // Cores Dinâmicas de UI
-        private Color clrFormBg;
-        private Color clrSidebarBg;
-        private Color clrCardBg;
-        private Color clrBorder;
-        private Color clrTextMain;
-        private Color clrTextSub;
-        private Color clrInputBg;
-        private Color clrAccent = Color.FromArgb(0, 120, 212);
-
-        public SettingsForm(
-            NetMonitorApp parent,
-            string lang,
-            string speedFormat,
-            string unit,
-            bool arrowRight,
-            bool locked,
-            bool hideScreensaver,
-            bool showHover,
-            bool followSysTheme,
-            string tpl,
-            string upChar,
-            string downChar,
-            string fontFam,
-            float fontSz,
-            FontStyle fontSt,
-            string txtColMode,
-            Color txtColUni,
-            Color txtColUp,
-            Color txtColDn,
-            string unitColMode,
-            Color unitColUni,
-            Color unitColUp,
-            Color unitColDn,
-            string arrColMode,
-            Color arrColUni,
-            Color arrColUp,
-            Color arrColDn)
-        {
-            this.parentApp = parent;
-            this.SelectedLanguage = lang;
-            this.SelectedSpeedUnitFormat = speedFormat;
-            this.SelectedUnitMode = unit;
-            this.SelectedArrowOnRight = arrowRight;
-            this.SelectedIsLocked = locked;
-            this.SelectedHideOnScreensaver = hideScreensaver;
-            this.SelectedShowHoverFlyout = showHover;
-            this.SelectedFollowSystemTheme = followSysTheme;
-            this.SelectedIconTemplate = tpl;
-            this.SelectedCustomUpChar = upChar;
-            this.SelectedCustomDownChar = downChar;
-
-            this.SelectedFontFamily = fontFam;
-            this.SelectedFontSize = fontSz;
-            this.SelectedFontStyle = fontSt;
-
-            this.SelectedTextColorMode = txtColMode;
-            this.SelectedTextColorUnified = txtColUni;
-            this.SelectedTextColorUp = txtColUp;
-            this.SelectedTextColorDown = txtColDn;
-
-            this.SelectedUnitColorMode = unitColMode;
-            this.SelectedUnitColorUnified = unitColUni;
-            this.SelectedUnitColorUp = unitColUp;
-            this.SelectedUnitColorDown = unitColDn;
-
-            this.SelectedArrowColorMode = arrColMode;
-            this.SelectedArrowColorUnified = arrColUni;
-            this.SelectedArrowColorUp = arrColUp;
-            this.SelectedArrowColorDown = arrColDn;
-
-            this.isDarkTheme = NetMonitorApp.IsWindowsDarkTheme();
-            SetupThemeColors();
-            InitializeUI();
-
-            try
-            {
-                SystemEvents.UserPreferenceChanged += OnThemeChanged;
-            }
-            catch { }
-        }
-
-        private void OnThemeChanged(object sender, UserPreferenceChangedEventArgs e)
-        {
-            try
-            {
-                if (this.IsHandleCreated)
-                {
-                    this.BeginInvoke((MethodInvoker)delegate
-                    {
-                        ApplyDynamicTheme(NetMonitorApp.IsWindowsDarkTheme());
-                    });
-                }
-                else
-                {
-                    ApplyDynamicTheme(NetMonitorApp.IsWindowsDarkTheme());
-                }
-            }
-            catch { }
-        }
-
-        protected override CreateParams CreateParams
-        {
-            get
-            {
-                CreateParams cp = base.CreateParams;
-                cp.ExStyle |= 0x00040000; // WS_EX_APPWINDOW: Garante presença explícita no alternador ALT+TAB do Windows
-                return cp;
-            }
-        }
-
-        protected override void OnHandleCreated(EventArgs e)
-        {
-            base.OnHandleCreated(e);
-            UpdateTitleBarTheme(isDarkTheme);
-        }
-
-        protected override void WndProc(ref Message m)
-        {
-            const int WM_SETTINGCHANGE = 0x001A;
-            const int WM_THEMECHANGED = 0x031A;
-            if (m.Msg == WM_SETTINGCHANGE || m.Msg == WM_THEMECHANGED)
-            {
-                ApplyDynamicTheme(NetMonitorApp.IsWindowsDarkTheme());
-            }
-            base.WndProc(ref m);
-        }
-
-        private void SetupThemeColors()
-        {
-            if (isDarkTheme)
-            {
-                clrFormBg = Color.FromArgb(32, 32, 35);
-                clrSidebarBg = Color.FromArgb(24, 24, 26);
-                clrCardBg = Color.FromArgb(42, 42, 46);
-                clrBorder = Color.FromArgb(60, 60, 65);
-                clrTextMain = Color.FromArgb(250, 250, 250);
-                clrTextSub = Color.FromArgb(180, 180, 185);
-                clrInputBg = Color.FromArgb(28, 28, 30);
-            }
-            else
-            {
-                clrFormBg = Color.FromArgb(243, 243, 246);
-                clrSidebarBg = Color.FromArgb(232, 232, 236);
-                clrCardBg = Color.FromArgb(255, 255, 255);
-                clrBorder = Color.FromArgb(215, 215, 220);
-                clrTextMain = Color.FromArgb(20, 20, 25);
-                clrTextSub = Color.FromArgb(90, 90, 95);
-                clrInputBg = Color.FromArgb(250, 250, 250);
-            }
-        }
-
-        private void UpdateTitleBarTheme(bool darkNow)
-        {
-            try
-            {
-                int val = darkNow ? 1 : 0;
-                DwmSetWindowAttribute(this.Handle, 20, ref val, sizeof(int));
-            }
-            catch { }
-        }
-
-        private void ApplyThemeRecursively(Control root, bool darkNow)
-        {
-            if (root == null) return;
-            foreach (Control c in root.Controls)
-            {
-                Label lbl = c as Label;
-                if (lbl != null)
-                {
-                    if (lbl == lblHeaderTitle)
-                    {
-                        lbl.ForeColor = clrTextMain;
-                    }
-                    else if (lbl == lblHeaderSubtitle)
-                    {
-                        lbl.ForeColor = clrTextSub;
-                    }
-                    else if (lbl == lblPrevTitle || lbl.Font.Bold)
-                    {
-                        lbl.ForeColor = clrAccent;
-                    }
-                    else if (lbl.Font.Size < 8.5f)
-                    {
-                        lbl.ForeColor = clrTextSub;
-                    }
-                    else if ((lbl == lblUp || lbl == lblDown) && cbTemplate != null && cbTemplate.SelectedIndex != 5)
-                    {
-                        lbl.ForeColor = clrTextSub;
-                    }
-                    else if (lbl == lblDevTitle)
-                    {
-                        lbl.ForeColor = clrTextSub;
-                    }
-                    else
-                    {
-                        lbl.ForeColor = clrTextMain;
-                    }
-                }
-                else
-                {
-                    RadioButton rb = c as RadioButton;
-                    if (rb != null)
-                    {
-                        rb.ForeColor = clrTextMain;
-                    }
-                    else
-                    {
-                        CheckBox cb = c as CheckBox;
-                        if (cb != null)
-                        {
-                            cb.ForeColor = cb.Font.Bold ? clrAccent : clrTextMain;
-                        }
-                        else
-                        {
-                            ComboBox cmb = c as ComboBox;
-                            if (cmb != null)
-                            {
-                                cmb.BackColor = clrInputBg;
-                                cmb.ForeColor = clrTextMain;
-                            }
-                            else
-                            {
-                                TextBox tb = c as TextBox;
-                                if (tb != null)
-                                {
-                                    tb.BackColor = clrInputBg;
-                                    tb.ForeColor = clrTextMain;
-                                }
-                                else
-                                {
-                                    Panel p = c as Panel;
-                                    if (p != null)
-                                    {
-                                        if (p.Height == 1)
-                                        {
-                                            p.BackColor = clrBorder;
-                                        }
-                                        else if (p == pnlPageGeral || p == pnlPageFonte || p == pnlPageCores || p == pnlPageIcones)
-                                        {
-                                            p.BackColor = clrCardBg;
-                                        }
-                                        else if (p == pnlLivePreview)
-                                        {
-                                            p.BackColor = darkNow ? NetMonitorApp.BG_COLOR_DARK : NetMonitorApp.BG_COLOR_LIGHT;
-                                        }
-                                    }
-                                    else
-                                    {
-                                        Button btn = c as Button;
-                                        if (btn != null)
-                                        {
-                                            string tagStr = btn.Tag as string;
-                                            if (tagStr == "ColorSwatch")
-                                            {
-                                                btn.FlatAppearance.BorderColor = clrBorder;
-                                            }
-                                            else if (tagStr == "PresetBtn")
-                                            {
-                                                btn.BackColor = clrCardBg;
-                                                btn.ForeColor = clrTextMain;
-                                                btn.FlatAppearance.BorderColor = clrBorder;
-                                            }
-                                            else if (btn == btnCancel || btn == btnResetDefaults)
-                                            {
-                                                btn.BackColor = clrCardBg;
-                                                btn.ForeColor = clrTextMain;
-                                                btn.FlatAppearance.BorderColor = clrBorder;
-                                            }
-                                            else if (btn == btnSave)
-                                            {
-                                                btn.BackColor = clrAccent;
-                                                btn.ForeColor = Color.White;
-                                            }
-                                        }
-                                        else
-                                        {
-                                            LinkLabel ll = c as LinkLabel;
-                                            if (ll != null)
-                                            {
-                                                if (ll == lnkDev) ll.LinkColor = clrAccent;
-                                                else ll.LinkColor = clrTextSub;
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-
-                if (c.HasChildren)
-                {
-                    ApplyThemeRecursively(c, darkNow);
-                }
-            }
-        }
-
-        public void ApplyDynamicTheme(bool darkNow)
-        {
-            isDarkTheme = darkNow;
-            SetupThemeColors();
-            UpdateTitleBarTheme(darkNow);
-
-            this.BackColor = clrFormBg;
-            if (pnlSidebar != null) pnlSidebar.BackColor = clrSidebarBg;
-            if (pnlMainContent != null) pnlMainContent.BackColor = clrFormBg;
-            if (pnlBottom != null) pnlBottom.BackColor = clrFormBg;
-
-            ApplyThemeRecursively(this, darkNow);
-            SwitchPage(currentPageIndex);
-
-            this.Invalidate(true);
-        }
-
-        // Envia as alterações ao vivo para o widget da barra de tarefas
-        private void TriggerLiveTuning()
-        {
-            if (parentApp == null) return;
-            parentApp.ApplyLiveTuning(
-                SelectedLanguage,
-                SelectedSpeedUnitFormat,
-                SelectedUnitMode,
-                SelectedArrowOnRight,
-                SelectedIsLocked,
-                SelectedHideOnScreensaver,
-                SelectedShowHoverFlyout,
-                SelectedIconTemplate,
-                SelectedCustomUpChar,
-                SelectedCustomDownChar,
-                SelectedFontFamily,
-                SelectedFontSize,
-                SelectedFontStyle,
-                SelectedTextColorMode,
-                SelectedTextColorUnified,
-                SelectedTextColorUp,
-                SelectedTextColorDown,
-                SelectedUnitColorMode,
-                SelectedUnitColorUnified,
-                SelectedUnitColorUp,
-                SelectedUnitColorDown,
-                SelectedArrowColorMode,
-                SelectedArrowColorUnified,
-                SelectedArrowColorUp,
-                SelectedArrowColorDown
-            );
-        }
-
-        private void InitializeUI()
-        {
-            bool isPt = SelectedLanguage == "pt";
-
-            this.Text = isPt ? "Personalização do NetMonitor v1.0.0" : "NetMonitor v1.0.0 Settings";
-            this.ClientSize = new Size(740, 540);
-            this.FormBorderStyle = FormBorderStyle.FixedDialog;
-            this.MaximizeBox = false;
-            this.MinimizeBox = false;
-            this.ShowInTaskbar = true;
-            try
-            {
-                if (parentApp != null && parentApp.Icon != null)
-                {
-                    this.Icon = parentApp.Icon;
-                }
-                else
-                {
-                    this.Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath);
-                }
-            }
-            catch { }
-            this.BackColor = clrFormBg;
-            this.Font = new Font("Segoe UI", 9.0f, FontStyle.Regular);
-
-            // Posiciona centralizado e contido no monitor ativo (sem transbordar)
-            Screen scr = (parentApp != null) ? Screen.FromControl(parentApp) : Screen.PrimaryScreen;
-            Rectangle wa = scr.WorkingArea;
-            int posX = Math.Max(wa.Left, Math.Min(wa.Right - this.Width, wa.Left + (wa.Width - this.Width) / 2));
-            int posY = Math.Max(wa.Top, Math.Min(wa.Bottom - this.Height, wa.Top + (wa.Height - this.Height) / 2));
-            this.StartPosition = FormStartPosition.Manual;
-            this.Location = new Point(posX, posY);
-
-            // ==============================================================
-            // 1. SIDEBAR LATERAL ESQUERDA (180px de largura, sem sobreposição)
-            // ==============================================================
-            pnlSidebar = new Panel
-            {
-                Location = new Point(0, 0),
-                Size = new Size(180, 540),
-                BackColor = clrSidebarBg,
-                Padding = new Padding(12, 14, 12, 12)
-            };
-            this.Controls.Add(pnlSidebar);
-
-            Label lblAppLogo = new Label
-            {
-                Text = "NetMonitor",
-                Font = new Font("Segoe UI", 11.5f, FontStyle.Bold),
-                ForeColor = clrTextMain,
-                AutoSize = true,
-                Location = new Point(16, 16)
-            };
-            pnlSidebar.Controls.Add(lblAppLogo);
-
-            Label lblAppVer = new Label
-            {
-                Text = "v1.0.0 • Settings",
-                Font = new Font("Segoe UI", 8.0f, FontStyle.Regular),
-                ForeColor = clrAccent,
-                AutoSize = true,
-                Location = new Point(16, 38)
-            };
-            pnlSidebar.Controls.Add(lblAppVer);
-
-            int btnY = 78;
-            btnNavGeral = CreateSidebarButton(isPt ? "⚙️  Geral" : "⚙️  General", btnY, () => SwitchPage(0));
-            btnNavFonte = CreateSidebarButton(isPt ? "🔤  Tipografia" : "🔤  Typography", btnY + 44, () => SwitchPage(1));
-            btnNavCores = CreateSidebarButton(isPt ? "🎨  Cores" : "🎨  Colors", btnY + 88, () => SwitchPage(2));
-            btnNavIcones = CreateSidebarButton(isPt ? "🔼  Ícones & Setas" : "🔼  Icons & Arrows", btnY + 132, () => SwitchPage(3));
-
-            pnlSidebar.Controls.Add(btnNavGeral);
-            pnlSidebar.Controls.Add(btnNavFonte);
-            pnlSidebar.Controls.Add(btnNavCores);
-            pnlSidebar.Controls.Add(btnNavIcones);
-
-            // Bloco do Desenvolvedor (Noé VFX)
-            Panel pnlDevDiv = new Panel
-            {
-                Location = new Point(14, 452),
-                Size = new Size(152, 1),
-                BackColor = clrBorder
-            };
-            pnlSidebar.Controls.Add(pnlDevDiv);
-
-            lblDevTitle = new Label
-            {
-                Text = isPt ? "desenvolvido por" : "developed by",
-                Font = new Font("Segoe UI", 7.0f, FontStyle.Regular),
-                ForeColor = clrTextSub,
-                Location = new Point(14, 460),
-                AutoSize = true,
-                UseMnemonic = false
-            };
-            pnlSidebar.Controls.Add(lblDevTitle);
-
-            lnkDev = new LinkLabel
-            {
-                Text = "Noé VFX | noevfx.com",
-                Font = new Font("Segoe UI", 8.0f, FontStyle.Bold),
-                LinkColor = clrAccent,
-                ActiveLinkColor = clrAccent,
-                VisitedLinkColor = clrAccent,
-                Location = new Point(14, 477),
-                AutoSize = true,
-                Cursor = Cursors.Hand,
-                UseMnemonic = false
-            };
-            lnkDev.LinkClicked += (s, e) => {
-                try { Process.Start("https://noevfx.com"); } catch { }
-            };
-            pnlSidebar.Controls.Add(lnkDev);
-
-            lnkContact = new LinkLabel
-            {
-                Text = "contato@noevfx.com",
-                Font = new Font("Segoe UI", 7.5f, FontStyle.Regular),
-                LinkColor = clrTextSub,
-                ActiveLinkColor = clrAccent,
-                VisitedLinkColor = clrTextSub,
-                Location = new Point(14, 497),
-                AutoSize = true,
-                Cursor = Cursors.Hand,
-                UseMnemonic = false
-            };
-            lnkContact.LinkClicked += (s, e) => {
-                try { Process.Start("mailto:contato@noevfx.com"); } catch { }
-            };
-            pnlSidebar.Controls.Add(lnkContact);
-
-            // ==============================================================
-            // 2. PAINEL PRINCIPAL DIREITO (560px de largura, inicia em X=180)
-            // ==============================================================
-            pnlMainContent = new Panel
-            {
-                Location = new Point(180, 0),
-                Size = new Size(560, 455),
-                BackColor = clrFormBg
-            };
-            this.Controls.Add(pnlMainContent);
-
-            lblHeaderTitle = new Label
-            {
-                Text = isPt ? "Preferências Gerais" : "General Preferences",
-                Font = new Font("Segoe UI", 13.0f, FontStyle.Bold),
-                ForeColor = clrTextMain,
-                AutoSize = true,
-                Location = new Point(24, 16),
-                UseMnemonic = false
-            };
-            pnlMainContent.Controls.Add(lblHeaderTitle);
-
-            lblHeaderSubtitle = new Label
-            {
-                Text = isPt ? "Configure idioma, medição, layout e proteção de exibição." : "Configure language, measurement, layout, and display protection.",
-                Font = new Font("Segoe UI", 8.5f, FontStyle.Regular),
-                ForeColor = clrTextSub,
-                AutoSize = true,
-                Location = new Point(25, 42)
-            };
-            pnlMainContent.Controls.Add(lblHeaderSubtitle);
-
-            // Container de cartões
-            int cardW = 512;
-            int cardH = 368;
-            int cardX = 24;
-            int cardY = 72;
-
-            pnlPageGeral = CreateCard(pnlMainContent, cardX, cardY, cardW, cardH);
-            pnlPageFonte = CreateCard(pnlMainContent, cardX, cardY, cardW, cardH);
-            pnlPageCores = CreateCard(pnlMainContent, cardX, cardY, cardW, cardH);
-            pnlPageIcones = CreateCard(pnlMainContent, cardX, cardY, cardW, cardH);
-
-            pnlPageFonte.Visible = false;
-            pnlPageCores.Visible = false;
-            pnlPageIcones.Visible = false;
-
-            BuildPageGeral(pnlPageGeral, isPt);
-            BuildPageFonte(pnlPageFonte, isPt);
-            BuildPageCores(pnlPageCores, isPt);
-            BuildPageIcones(pnlPageIcones, isPt);
-
-            // ==============================================================
-            // 3. BARRA INFERIOR (Inicia em X=180, Y=455, Height=85)
-            // ==============================================================
-            pnlBottom = new Panel
-            {
-                Location = new Point(180, 455),
-                Size = new Size(560, 85),
-                BackColor = clrFormBg
-            };
-            this.Controls.Add(pnlBottom);
-
-            Panel pnlDiv = new Panel
-            {
-                Location = new Point(24, 0),
-                Size = new Size(cardW, 1),
-                BackColor = clrBorder
-            };
-            pnlBottom.Controls.Add(pnlDiv);
-
-            pnlLivePreview = new Panel
-            {
-                Location = new Point(18, 18),
-                Size = new Size(100, 42),
-                BackColor = isDarkTheme ? NetMonitorApp.BG_COLOR_DARK : NetMonitorApp.BG_COLOR_LIGHT
-            };
-            pnlLivePreview.Paint += PnlLivePreview_Paint;
-            pnlBottom.Controls.Add(pnlLivePreview);
-
-            lblPrevTitle = new Label
-            {
-                Text = isPt ? "PRÉVIA AO VIVO" : "LIVE PREVIEW",
-                Font = new Font("Segoe UI", 7.5f, FontStyle.Bold),
-                ForeColor = clrAccent,
-                Location = new Point(124, 20),
-                Size = new Size(110, 16),
-                AutoSize = false,
-                UseMnemonic = false
-            };
-            pnlBottom.Controls.Add(lblPrevTitle);
-
-            lblPrevDesc = new Label
-            {
-                Text = isPt ? "Tempo real" : "Real-time",
-                Font = new Font("Segoe UI", 7.5f, FontStyle.Regular),
-                ForeColor = clrTextSub,
-                Location = new Point(124, 38),
-                Size = new Size(110, 18),
-                AutoSize = false,
-                UseMnemonic = false
-            };
-            pnlBottom.Controls.Add(lblPrevDesc);
-
-            btnResetDefaults = new Button
-            {
-                Text = isPt ? "Redefinir Padrões" : "Reset Defaults",
-                Font = new Font("Segoe UI", 8.0f, FontStyle.Regular),
-                Location = new Point(238, 20),
-                Size = new Size(108, 36),
-                BackColor = clrCardBg,
-                ForeColor = clrTextMain,
-                FlatStyle = FlatStyle.Flat,
-                Cursor = Cursors.Hand,
-                UseMnemonic = false
-            };
-            btnResetDefaults.FlatAppearance.BorderColor = clrBorder;
-            btnResetDefaults.Click += (s, e) => ResetToDefaults(SelectedLanguage == "pt");
-            pnlBottom.Controls.Add(btnResetDefaults);
-
-            btnSave = new Button
-            {
-                Text = isPt ? "Salvar" : "Save",
-                Font = new Font("Segoe UI", 9.0f, FontStyle.Bold),
-                Location = new Point(354, 20),
-                Size = new Size(88, 36),
-                BackColor = clrAccent,
-                ForeColor = Color.White,
-                FlatStyle = FlatStyle.Flat,
-                Cursor = Cursors.Hand,
-                UseMnemonic = false
-            };
-            btnSave.FlatAppearance.BorderSize = 0;
-            btnSave.Click += BtnSave_Click;
-            pnlBottom.Controls.Add(btnSave);
-
-            btnCancel = new Button
-            {
-                Text = isPt ? "Cancelar" : "Cancel",
-                Font = new Font("Segoe UI", 9.0f, FontStyle.Regular),
-                Location = new Point(450, 20),
-                Size = new Size(88, 36),
-                BackColor = clrCardBg,
-                ForeColor = clrTextMain,
-                FlatStyle = FlatStyle.Flat,
-                Cursor = Cursors.Hand,
-                UseMnemonic = false
-            };
-            btnCancel.FlatAppearance.BorderColor = clrBorder;
-            btnCancel.Click += (s, e) => { this.DialogResult = DialogResult.Cancel; this.Close(); };
-            pnlBottom.Controls.Add(btnCancel);
-
-            SwitchPage(0);
-        }
-
-        private Button CreateSidebarButton(string text, int top, Action onClick)
-        {
-            Button btn = new Button
-            {
-                Text = text,
-                Location = new Point(8, top),
-                Size = new Size(164, 38),
-                FlatStyle = FlatStyle.Flat,
-                TextAlign = ContentAlignment.MiddleLeft,
-                Padding = new Padding(12, 0, 0, 0),
-                Font = new Font("Segoe UI", 9.0f, FontStyle.Regular),
-                ForeColor = clrTextMain,
-                BackColor = Color.Transparent,
-                Cursor = Cursors.Hand,
-                UseMnemonic = false
-            };
-            btn.FlatAppearance.BorderSize = 0;
-            btn.Click += (s, e) => onClick();
-            return btn;
-        }
-
-        private void SwitchPage(int index)
-        {
-            currentPageIndex = index;
-            bool isPt = SelectedLanguage == "pt";
-            pnlPageGeral.Visible = (index == 0);
-            pnlPageFonte.Visible = (index == 1);
-            pnlPageCores.Visible = (index == 2);
-            pnlPageIcones.Visible = (index == 3);
-
-            Button[] btns = new Button[] { btnNavGeral, btnNavFonte, btnNavCores, btnNavIcones };
-            for (int i = 0; i < btns.Length; i++)
-            {
-                if (i == index)
-                {
-                    btns[i].BackColor = clrAccent;
-                    btns[i].ForeColor = Color.White;
-                    btns[i].Font = new Font("Segoe UI", 9.0f, FontStyle.Bold);
-                }
-                else
-                {
-                    btns[i].BackColor = Color.Transparent;
-                    btns[i].ForeColor = clrTextMain;
-                    btns[i].Font = new Font("Segoe UI", 9.0f, FontStyle.Regular);
-                }
-            }
-
-            if (index == 0)
-            {
-                lblHeaderTitle.Text = isPt ? "Preferências Gerais" : "General Preferences";
-                lblHeaderSubtitle.Text = isPt ? "Configure idioma, medição, layout e proteção de exibição." : "Configure language, measurement, layout, and display protection.";
-            }
-            else if (index == 1)
-            {
-                lblHeaderTitle.Text = isPt ? "Tipografia da Barra" : "Taskbar Typography";
-                lblHeaderSubtitle.Text = isPt ? "Família, tamanho e estilo calibrados para legibilidade total." : "Calibrated family, size, and style for maximum readability.";
-            }
-            else if (index == 2)
-            {
-                lblHeaderTitle.Text = isPt ? "Personalização de Cores" : "Color Customization";
-                lblHeaderSubtitle.Text = isPt ? "Defina cores independentes para números, unidades e setas." : "Define independent colors for numbers, units, and arrows.";
-            }
-            else if (index == 3)
-            {
-                lblHeaderTitle.Text = isPt ? "Modelos de Ícones & Setas" : "Arrow & Icon Templates";
-                lblHeaderSubtitle.Text = isPt ? "Escolha vetores modernos ou defina caracteres personalizados." : "Choose modern vectors or set custom unicode characters.";
-            }
-        }
-
-        // ==============================================================================
-        // PÁGINA 1: GERAL
-        // ==============================================================================
-        private void BuildPageGeral(Panel card, bool isPt)
-        {
-            // 1. Idioma
-            CreateLabel(card, isPt ? "Idioma da Interface:" : "Interface Language:", 20, 20);
-            cbLang = CreateComboBox(card, 180, 18, 310);
-            cbLang.Items.AddRange(new object[] { "Português (Brasil)", "English (United States)" });
-            cbLang.SelectedIndex = SelectedLanguage == "pt" ? 0 : 1;
-            cbLang.SelectedIndexChanged += (s, e) =>
-            {
-                SelectedLanguage = (cbLang.SelectedIndex == 0) ? "pt" : "en";
-                UpdateLanguageTexts();
-                TriggerLiveTuning();
-            };
-
-            // 2. Formato de Medição (Bits vs Bytes)
-            CreateLabel(card, isPt ? "Formato de Medição:" : "Measurement Format:", 20, 58);
-            cbFormat = CreateComboBox(card, 180, 56, 310);
-            cbFormat.Items.AddRange(new object[] {
-                isPt ? "Bits (Mbps, Kbps, Gbps) [Padrão]" : "Bits (Mbps, Kbps, Gbps) [Default]",
-                isPt ? "Bytes (MB/s, KB/s, GB/s)" : "Bytes (MB/s, KB/s, GB/s)"
-            });
-            cbFormat.SelectedIndex = (SelectedSpeedUnitFormat == "Bytes") ? 1 : 0;
-            cbFormat.SelectedIndexChanged += (s, e) =>
-            {
-                SelectedSpeedUnitFormat = (cbFormat.SelectedIndex == 1) ? "Bytes" : "Bits";
-                UpdateUnitComboItems(isPt);
-                pnlLivePreview.Invalidate();
-                TriggerLiveTuning();
-            };
-
-            // 3. Escala da Unidade
-            CreateLabel(card, isPt ? "Escala da Unidade:" : "Unit Scale:", 20, 96);
-            cbUnits = CreateComboBox(card, 180, 94, 310);
-            UpdateUnitComboItems(isPt);
-            cbUnits.SelectedIndexChanged += (s, e) =>
-            {
-                if (cbUnits.SelectedIndex == 0) SelectedUnitMode = "Auto";
-                else SelectedUnitMode = cbUnits.SelectedItem.ToString();
-                pnlLivePreview.Invalidate();
-                TriggerLiveTuning();
-            };
-
-            // Divisor 1
-            Panel div = new Panel { Location = new Point(20, 136), Size = new Size(card.Width - 40, 1), BackColor = clrBorder };
-            card.Controls.Add(div);
-
-            // 4. Posição das Setas
-            CreateLabel(card, isPt ? "Posição das Setas:" : "Arrow Position:", 20, 150);
-
-            rbRight = new RadioButton
-            {
-                Text = isPt ? "À Direita (823 Kbps ▲) [Padrão]" : "On Right (823 Kbps ▲) [Default]",
-                Location = new Point(180, 148),
-                AutoSize = true,
-                ForeColor = clrTextMain,
-                Checked = SelectedArrowOnRight
-            };
-            rbLeft = new RadioButton
-            {
-                Text = isPt ? "À Esquerda (▲ 823 Kbps)" : "On Left (▲ 823 Kbps)",
-                Location = new Point(180, 174),
-                AutoSize = true,
-                ForeColor = clrTextMain,
-                Checked = !SelectedArrowOnRight
-            };
-            rbRight.CheckedChanged += (s, e) =>
-            {
-                SelectedArrowOnRight = rbRight.Checked;
-                pnlLivePreview.Invalidate();
-                TriggerLiveTuning();
-            };
-            card.Controls.Add(rbRight);
-            card.Controls.Add(rbLeft);
-
-            // Divisor 2
-            Panel div2 = new Panel { Location = new Point(20, 210), Size = new Size(card.Width - 40, 1), BackColor = clrBorder };
-            card.Controls.Add(div2);
-
-            // 5. Opções de Sistema
-            chkLock = new CheckBox
-            {
-                Text = isPt ? "Travar posição na barra de tarefas" : "Lock position on taskbar",
-                Location = new Point(20, 224),
-                AutoSize = true,
-                ForeColor = clrTextMain,
-                Checked = SelectedIsLocked
-            };
-            chkLock.CheckedChanged += (s, e) => { SelectedIsLocked = chkLock.Checked; TriggerLiveTuning(); };
-            card.Controls.Add(chkLock);
-
-            chkScreensaver = new CheckBox
-            {
-                Text = isPt ? "Ocultar automaticamente no Screensaver e Tela de Bloqueio" : "Auto-hide on Screensaver and Lock Screen",
-                Location = new Point(20, 254),
-                AutoSize = true,
-                ForeColor = clrAccent,
-                Font = new Font("Segoe UI", 9.0f, FontStyle.Bold),
-                Checked = SelectedHideOnScreensaver
-            };
-            chkScreensaver.CheckedChanged += (s, e) => { SelectedHideOnScreensaver = chkScreensaver.Checked; TriggerLiveTuning(); };
-            card.Controls.Add(chkScreensaver);
-
-            Label lblHintSs = new Label
-            {
-                Text = isPt ? "Evita que o monitor de rede fique visível por cima do protetor de tela." : "Prevents the network monitor from drawing over the screensaver.",
-                Font = new Font("Segoe UI", 7.5f, FontStyle.Regular),
-                ForeColor = clrTextSub,
-                Location = new Point(42, 278),
-                AutoSize = true
-            };
-            card.Controls.Add(lblHintSs);
-
-            chkHoverFlyout = new CheckBox
-            {
-                Text = isPt ? "Exibir Top 5 programas ao passar o mouse (Hover)" : "Show Top 5 apps on mouse hover (Flyout)",
-                Location = new Point(20, 304),
-                AutoSize = true,
-                ForeColor = clrAccent,
-                Font = new Font("Segoe UI", 9.0f, FontStyle.Bold),
-                Checked = SelectedShowHoverFlyout
-            };
-            chkHoverFlyout.CheckedChanged += (s, e) => { SelectedShowHoverFlyout = chkHoverFlyout.Checked; TriggerLiveTuning(); };
-            card.Controls.Add(chkHoverFlyout);
-
-            Label lblHintHover = new Label
-            {
-                Text = isPt ? "Card moderno e dinâmico com os 5 processos que mais consomem banda ao vivo." : "Dynamic modern card showing top 5 bandwidth consuming apps live.",
-                Font = new Font("Segoe UI", 7.5f, FontStyle.Regular),
-                ForeColor = clrTextSub,
-                Location = new Point(42, 328),
-                AutoSize = true
-            };
-            card.Controls.Add(lblHintHover);
-        }
-
-        private void UpdateUnitComboItems(bool isPt)
-        {
-            cbUnits.Items.Clear();
-            if (SelectedSpeedUnitFormat == "Bytes")
-            {
-                cbUnits.Items.AddRange(new object[] {
-                    isPt ? "Automático (KB/s, MB/s, GB/s)" : "Auto (KB/s, MB/s, GB/s)",
-                    "KB/s", "MB/s", "GB/s"
-                });
-            }
-            else
-            {
-                cbUnits.Items.AddRange(new object[] {
-                    isPt ? "Automático (Kbps, Mbps, Gbps) [Padrão]" : "Auto (Kbps, Mbps, Gbps) [Default]",
-                    "Kbps", "Mbps", "Gbps"
-                });
-            }
-
-            int idx = 0;
-            for (int i = 0; i < cbUnits.Items.Count; i++)
-            {
-                if (cbUnits.Items[i].ToString().StartsWith(SelectedUnitMode, StringComparison.OrdinalIgnoreCase))
-                {
-                    idx = i;
-                    break;
-                }
-            }
-            cbUnits.SelectedIndex = idx;
-        }
-
-        private void UpdateLanguageTexts()
-        {
-            bool isPt = (SelectedLanguage == "pt");
-            this.Text = isPt ? "Personalização do NetMonitor v1.0.0" : "NetMonitor v1.0.0 Settings";
-            btnNavGeral.Text = isPt ? "⚙️  Geral" : "⚙️  General";
-            btnNavFonte.Text = isPt ? "🔤  Tipografia" : "🔤  Typography";
-            btnNavCores.Text = isPt ? "🎨  Cores" : "🎨  Colors";
-            btnNavIcones.Text = isPt ? "🔼  Ícones & Setas" : "🔼  Icons & Arrows";
-            btnSave.Text = isPt ? "Salvar" : "Save";
-            btnCancel.Text = isPt ? "Cancelar" : "Cancel";
-            if (btnResetDefaults != null) btnResetDefaults.Text = isPt ? "Redefinir Padrões" : "Reset Defaults";
-            if (lblDevTitle != null) lblDevTitle.Text = isPt ? "desenvolvido por" : "developed by";
-            lblPrevTitle.Text = isPt ? "PRÉVIA AO VIVO" : "LIVE PREVIEW";
-            lblPrevDesc.Text = isPt ? "Tempo real" : "Real-time";
-            if (btnPresetCiano != null) btnPresetCiano.Text = isPt ? "Ciano & Verde" : "Cyan & Green";
-            if (btnPresetClassico != null) btnPresetClassico.Text = isPt ? "Clássico Rede" : "Classic Net";
-            if (btnPresetPadrao != null) btnPresetPadrao.Text = isPt ? "Padrão Win11" : "Win11 Default";
-            if (btnPresetMono != null) btnPresetMono.Text = isPt ? "Monocromático" : "Monochrome";
-            SwitchPage(pnlPageGeral.Visible ? 0 : pnlPageFonte.Visible ? 1 : pnlPageCores.Visible ? 2 : 3);
-        }
-
-        private void ResetToDefaults(bool isPt)
-        {
-            // 1. Geral
-            SelectedLanguage = "pt";
-            if (cbLang != null) cbLang.SelectedIndex = 0;
-
-            SelectedSpeedUnitFormat = "Bits";
-            if (cbFormat != null) cbFormat.SelectedIndex = 0;
-
-            SelectedUnitMode = "Auto";
-            if (cbUnits != null) cbUnits.SelectedIndex = 0;
-
-            SelectedArrowOnRight = true;
-            if (rbRight != null) rbRight.Checked = true;
-            if (rbLeft != null) rbLeft.Checked = false;
-
-            SelectedIsLocked = false;
-            if (chkLock != null) chkLock.Checked = false;
-
-            SelectedHideOnScreensaver = true;
-            if (chkScreensaver != null) chkScreensaver.Checked = true;
-
-            SelectedShowHoverFlyout = true;
-            if (chkHoverFlyout != null) chkHoverFlyout.Checked = true;
-
-            // 2. Tipografia
-            SelectedFontFamily = "Segoe UI Variable Display";
-            if (cbFontFamily != null)
-            {
-                int fIdx = 0;
-                for (int i = 0; i < cbFontFamily.Items.Count; i++)
-                {
-                    if (string.Equals(cbFontFamily.Items[i].ToString(), "Segoe UI Variable Display", StringComparison.OrdinalIgnoreCase))
-                    {
-                        fIdx = i;
-                        break;
-                    }
-                }
-                cbFontFamily.SelectedIndex = fIdx;
-            }
-
-            SelectedFontSize = 9.5f;
-            if (cbFontSize != null) cbFontSize.SelectedIndex = 3;
-
-            SelectedFontStyle = FontStyle.Bold;
-            if (cbFontStyle != null) cbFontStyle.SelectedIndex = 1;
-
-            // 3. Cores
-            SelectedTextColorMode = "Unified";
-            SelectedTextColorUnified = Color.FromArgb(255, 255, 255);
-            SelectedTextColorUp = Color.FromArgb(255, 255, 255);
-            SelectedTextColorDown = Color.FromArgb(255, 255, 255);
-            UpdateColorButtonDisplay(btnColorTextBoth, isPt ? "Ambos" : "Both", SelectedTextColorUnified);
-            UpdateColorButtonDisplay(btnColorTextUp, "Upload ▲", SelectedTextColorUp);
-            UpdateColorButtonDisplay(btnColorTextDown, "Download ▼", SelectedTextColorDown);
-            if (rbTextUnified != null) rbTextUnified.Checked = true;
-            if (rbTextIndividual != null) rbTextIndividual.Checked = false;
-
-            SelectedUnitColorMode = "Inherit";
-            SelectedUnitColorUnified = Color.FromArgb(190, 190, 190);
-            SelectedUnitColorUp = Color.FromArgb(190, 190, 190);
-            SelectedUnitColorDown = Color.FromArgb(190, 190, 190);
-            UpdateColorButtonDisplay(btnColorUnitBoth, isPt ? "Unidade" : "Unit", SelectedUnitColorUnified);
-            UpdateColorButtonDisplay(btnColorUnitUp, isPt ? "Unidade Up" : "Unit Up", SelectedUnitColorUp);
-            UpdateColorButtonDisplay(btnColorUnitDown, isPt ? "Unidade Down" : "Unit Down", SelectedUnitColorDown);
-            if (rbUnitInherit != null) rbUnitInherit.Checked = true;
-            if (rbUnitUnified != null) rbUnitUnified.Checked = false;
-            if (rbUnitIndividual != null) rbUnitIndividual.Checked = false;
-
-            SelectedArrowColorMode = "Unified";
-            SelectedArrowColorUnified = Color.FromArgb(235, 235, 235);
-            SelectedArrowColorUp = Color.FromArgb(235, 235, 235);
-            SelectedArrowColorDown = Color.FromArgb(235, 235, 235);
-            UpdateColorButtonDisplay(btnColorArrowBoth, isPt ? "Ambas" : "Both", SelectedArrowColorUnified);
-            UpdateColorButtonDisplay(btnColorArrowUp, "Seta Up ▲", SelectedArrowColorUp);
-            UpdateColorButtonDisplay(btnColorArrowDown, "Seta Down ▼", SelectedArrowColorDown);
-            if (rbArrowUnified != null) rbArrowUnified.Checked = true;
-            if (rbArrowIndividual != null) rbArrowIndividual.Checked = false;
-
-            UpdateColorControlsState();
-
-            // 4. Ícones & Setas
-            SelectedIconTemplate = "VectorTriangle";
-            if (cbTemplate != null) cbTemplate.SelectedIndex = 0;
-
-            SelectedCustomUpChar = "▲";
-            SelectedCustomDownChar = "▼";
-            if (txtUp != null) txtUp.Text = "▲";
-            if (txtDown != null) txtDown.Text = "▼";
-            if (lblUp != null) { lblUp.Enabled = true; lblUp.ForeColor = clrTextSub; }
-            if (txtUp != null) txtUp.Enabled = false;
-            if (lblDown != null) { lblDown.Enabled = true; lblDown.ForeColor = clrTextSub; }
-            if (txtDown != null) txtDown.Enabled = false;
-
-            UpdateLanguageTexts();
-            if (pnlLivePreview != null) pnlLivePreview.Invalidate();
-            TriggerLiveTuning();
-        }
-
-        // ==============================================================================
-        // PÁGINA 2: TIPOGRAFIA
-        // ==============================================================================
-        private void BuildPageFonte(Panel card, bool isPt)
-        {
-            // 1. Família da Fonte
-            CreateLabel(card, isPt ? "Família da Fonte:" : "Font Family:", 20, 24);
-            cbFontFamily = CreateComboBox(card, 180, 22, 310);
-
-            string[] commonFonts = new string[] {
-                "Segoe UI Variable Display",
-                "Segoe UI",
-                "Consolas",
-                "Aptos",
-                "Arial",
-                "Tahoma",
-                "Verdana",
-                "Cascadia Code"
-            };
-            foreach (var fn in commonFonts)
-            {
-                if (NetMonitorApp.IsFontInstalled(fn) || fn == "Segoe UI" || fn == "Segoe UI Variable Display")
-                    cbFontFamily.Items.Add(fn);
-            }
-
-            int selFontIdx = 0;
-            for (int i = 0; i < cbFontFamily.Items.Count; i++)
-            {
-                if (string.Equals(cbFontFamily.Items[i].ToString(), SelectedFontFamily, StringComparison.OrdinalIgnoreCase))
-                {
-                    selFontIdx = i;
-                    break;
-                }
-            }
-            cbFontFamily.SelectedIndex = selFontIdx;
-            cbFontFamily.SelectedIndexChanged += (s, e) =>
-            {
-                SelectedFontFamily = cbFontFamily.SelectedItem.ToString();
-                pnlLivePreview.Invalidate();
-                TriggerLiveTuning();
-            };
-
-            // 2. Tamanho da Fonte
-            CreateLabel(card, isPt ? "Tamanho da Fonte:" : "Font Size:", 20, 72);
-            cbFontSize = CreateComboBox(card, 180, 70, 310);
-            cbFontSize.Items.AddRange(new object[] {
-                "8.0 pt", "8.5 pt", "9.0 pt",
-                isPt ? "9.5 pt [Padrão de Fábrica]" : "9.5 pt [Default]",
-                "10.0 pt", "10.5 pt", "11.0 pt", "12.0 pt"
-            });
-
-            if (Math.Abs(SelectedFontSize - 8.0f) < 0.1f) cbFontSize.SelectedIndex = 0;
-            else if (Math.Abs(SelectedFontSize - 8.5f) < 0.1f) cbFontSize.SelectedIndex = 1;
-            else if (Math.Abs(SelectedFontSize - 9.0f) < 0.1f) cbFontSize.SelectedIndex = 2;
-            else if (Math.Abs(SelectedFontSize - 9.5f) < 0.1f) cbFontSize.SelectedIndex = 3;
-            else if (Math.Abs(SelectedFontSize - 10.0f) < 0.1f) cbFontSize.SelectedIndex = 4;
-            else if (Math.Abs(SelectedFontSize - 10.5f) < 0.1f) cbFontSize.SelectedIndex = 5;
-            else if (Math.Abs(SelectedFontSize - 11.0f) < 0.1f) cbFontSize.SelectedIndex = 6;
-            else if (Math.Abs(SelectedFontSize - 12.0f) < 0.1f) cbFontSize.SelectedIndex = 7;
-            else cbFontSize.SelectedIndex = 3;
-
-            cbFontSize.SelectedIndexChanged += (s, e) =>
-            {
-                int idx = cbFontSize.SelectedIndex;
-                float[] sizes = new float[] { 8.0f, 8.5f, 9.0f, 9.5f, 10.0f, 10.5f, 11.0f, 12.0f };
-                SelectedFontSize = (idx >= 0 && idx < sizes.Length) ? sizes[idx] : 9.5f;
-                pnlLivePreview.Invalidate();
-                TriggerLiveTuning();
-            };
-
-            // 3. Estilo da Fonte
-            CreateLabel(card, isPt ? "Estilo da Fonte:" : "Font Style:", 20, 120);
-            cbFontStyle = CreateComboBox(card, 180, 118, 310);
-            cbFontStyle.Items.AddRange(new object[] {
-                isPt ? "Normal (Regular)" : "Regular",
-                isPt ? "Negrito (Bold) [Padrão de Fábrica]" : "Bold [Default]",
-                isPt ? "Itálico (Italic)" : "Italic"
-            });
-
-            if (SelectedFontStyle == FontStyle.Bold) cbFontStyle.SelectedIndex = 1;
-            else if (SelectedFontStyle == FontStyle.Italic) cbFontStyle.SelectedIndex = 2;
-            else cbFontStyle.SelectedIndex = 0;
-
-            cbFontStyle.SelectedIndexChanged += (s, e) =>
-            {
-                if (cbFontStyle.SelectedIndex == 1) SelectedFontStyle = FontStyle.Bold;
-                else if (cbFontStyle.SelectedIndex == 2) SelectedFontStyle = FontStyle.Italic;
-                else SelectedFontStyle = FontStyle.Regular;
-                pnlLivePreview.Invalidate();
-                TriggerLiveTuning();
-            };
-
-            // Divisor
-            Panel div = new Panel { Location = new Point(20, 170), Size = new Size(card.Width - 40, 1), BackColor = clrBorder };
-            card.Controls.Add(div);
-
-            Label lblTip = new Label
-            {
-                Text = isPt ?
-                    "Dica de Nitidez: A fonte 'Segoe UI Variable Display' a 9.5 pt Negrito oferece contraste e legibilidade ideais na barra de tarefas do Windows 11, adaptando automaticamente o espaçamento das unidades." :
-                    "Sharpness Tip: 'Segoe UI Variable Display' at 9.5 pt Bold offers ideal contrast and readability on Windows 11 taskbar.",
-                Font = new Font("Segoe UI", 8.0f, FontStyle.Regular),
-                ForeColor = clrTextSub,
-                Location = new Point(20, 188),
-                Size = new Size(card.Width - 40, 90)
-            };
-            card.Controls.Add(lblTip);
-        }
-
-        // ==============================================================================
-        // PÁGINA 3: CORES
-        // ==============================================================================
-        private void BuildPageCores(Panel card, bool isPt)
-        {
-            // -------------------------------------------------------------
-            // Seção 1: Números da Velocidade
-            // -------------------------------------------------------------
-            Label lblSecNum = new Label
-            {
-                Text = isPt ? "1. Números da Velocidade:" : "1. Speed Numbers:",
-                Font = new Font("Segoe UI", 9.0f, FontStyle.Bold),
-                ForeColor = clrAccent,
-                Location = new Point(18, 14),
-                AutoSize = true
-            };
-            card.Controls.Add(lblSecNum);
-
-            Panel pnlGrpText = new Panel { Location = new Point(205, 8), Size = new Size(295, 26), BackColor = Color.Transparent };
-            rbTextUnified = new RadioButton
-            {
-                Text = isPt ? "Unificado" : "Unified",
-                Location = new Point(5, 4),
-                AutoSize = true,
-                ForeColor = clrTextMain,
-                Checked = SelectedTextColorMode == "Unified"
-            };
-            rbTextIndividual = new RadioButton
-            {
-                Text = isPt ? "Individual" : "Individual",
-                Location = new Point(105, 4),
-                AutoSize = true,
-                ForeColor = clrTextMain,
-                Checked = SelectedTextColorMode == "Individual"
-            };
-            pnlGrpText.Controls.Add(rbTextUnified);
-            pnlGrpText.Controls.Add(rbTextIndividual);
-            card.Controls.Add(pnlGrpText);
-
-            btnColorTextBoth = CreateColorButton(card, isPt ? "Ambos" : "Both", 18, 38, SelectedTextColorUnified, (col) => {
-                SelectedTextColorUnified = col;
-                btnColorTextBoth.BackColor = col;
-                btnColorTextBoth.ForeColor = GetContrastTextColor(col);
-                pnlLivePreview.Invalidate();
-                TriggerLiveTuning();
-            });
-
-            btnColorTextUp = CreateColorButton(card, "Upload ▲", 180, 38, SelectedTextColorUp, (col) => {
-                SelectedTextColorUp = col;
-                btnColorTextUp.BackColor = col;
-                btnColorTextUp.ForeColor = GetContrastTextColor(col);
-                pnlLivePreview.Invalidate();
-                TriggerLiveTuning();
-            });
-
-            btnColorTextDown = CreateColorButton(card, "Download ▼", 342, 38, SelectedTextColorDown, (col) => {
-                SelectedTextColorDown = col;
-                btnColorTextDown.BackColor = col;
-                btnColorTextDown.ForeColor = GetContrastTextColor(col);
-                pnlLivePreview.Invalidate();
-                TriggerLiveTuning();
-            });
-
-            rbTextUnified.CheckedChanged += (s, e) => {
-                SelectedTextColorMode = rbTextIndividual.Checked ? "Individual" : "Unified";
-                UpdateColorControlsState();
-                TriggerLiveTuning();
-            };
-            rbTextIndividual.CheckedChanged += (s, e) => {
-                SelectedTextColorMode = rbTextIndividual.Checked ? "Individual" : "Unified";
-                UpdateColorControlsState();
-                TriggerLiveTuning();
-            };
-
-            // Divisor 1
-            Panel div1 = new Panel { Location = new Point(18, 88), Size = new Size(card.Width - 36, 1), BackColor = clrBorder };
-            card.Controls.Add(div1);
-
-            // -------------------------------------------------------------
-            // Seção 2: Unidade de Medição (Kbps / MB/s)
-            // -------------------------------------------------------------
-            Label lblSecUnit = new Label
-            {
-                Text = isPt ? "2. Unidade (Kbps/MB/s):" : "2. Unit (Kbps/MB/s):",
-                Font = new Font("Segoe UI", 9.0f, FontStyle.Bold),
-                ForeColor = clrAccent,
-                Location = new Point(18, 100),
-                AutoSize = true
-            };
-            card.Controls.Add(lblSecUnit);
-
-            Panel pnlGrpUnit = new Panel { Location = new Point(185, 94), Size = new Size(315, 26), BackColor = Color.Transparent };
-            rbUnitInherit = new RadioButton
-            {
-                Text = isPt ? "Igual Números" : "Match Numbers",
-                Location = new Point(5, 4),
-                AutoSize = true,
-                ForeColor = clrTextMain,
-                Checked = SelectedUnitColorMode == "Inherit"
-            };
-            rbUnitUnified = new RadioButton
-            {
-                Text = isPt ? "Unificado" : "Unified",
-                Location = new Point(125, 4),
-                AutoSize = true,
-                ForeColor = clrTextMain,
-                Checked = SelectedUnitColorMode == "Unified"
-            };
-            rbUnitIndividual = new RadioButton
-            {
-                Text = isPt ? "Individual" : "Individual",
-                Location = new Point(215, 4),
-                AutoSize = true,
-                ForeColor = clrTextMain,
-                Checked = SelectedUnitColorMode == "Individual"
-            };
-            pnlGrpUnit.Controls.Add(rbUnitInherit);
-            pnlGrpUnit.Controls.Add(rbUnitUnified);
-            pnlGrpUnit.Controls.Add(rbUnitIndividual);
-            card.Controls.Add(pnlGrpUnit);
-
-            btnColorUnitBoth = CreateColorButton(card, isPt ? "Unidade" : "Unit", 18, 124, SelectedUnitColorUnified, (col) => {
-                SelectedUnitColorUnified = col;
-                btnColorUnitBoth.BackColor = col;
-                btnColorUnitBoth.ForeColor = GetContrastTextColor(col);
-                pnlLivePreview.Invalidate();
-                TriggerLiveTuning();
-            });
-
-            btnColorUnitUp = CreateColorButton(card, isPt ? "Unidade Up" : "Unit Up", 180, 124, SelectedUnitColorUp, (col) => {
-                SelectedUnitColorUp = col;
-                btnColorUnitUp.BackColor = col;
-                btnColorUnitUp.ForeColor = GetContrastTextColor(col);
-                pnlLivePreview.Invalidate();
-                TriggerLiveTuning();
-            });
-
-            btnColorUnitDown = CreateColorButton(card, isPt ? "Unidade Down" : "Unit Down", 342, 124, SelectedUnitColorDown, (col) => {
-                SelectedUnitColorDown = col;
-                btnColorUnitDown.BackColor = col;
-                btnColorUnitDown.ForeColor = GetContrastTextColor(col);
-                pnlLivePreview.Invalidate();
-                TriggerLiveTuning();
-            });
-
-            rbUnitInherit.CheckedChanged += (s, e) => {
-                if (rbUnitIndividual.Checked) SelectedUnitColorMode = "Individual";
-                else if (rbUnitUnified.Checked) SelectedUnitColorMode = "Unified";
-                else SelectedUnitColorMode = "Inherit";
-                UpdateColorControlsState();
-                TriggerLiveTuning();
-            };
-            rbUnitUnified.CheckedChanged += (s, e) => {
-                if (rbUnitIndividual.Checked) SelectedUnitColorMode = "Individual";
-                else if (rbUnitUnified.Checked) SelectedUnitColorMode = "Unified";
-                else SelectedUnitColorMode = "Inherit";
-                UpdateColorControlsState();
-                TriggerLiveTuning();
-            };
-            rbUnitIndividual.CheckedChanged += (s, e) => {
-                if (rbUnitIndividual.Checked) SelectedUnitColorMode = "Individual";
-                else if (rbUnitUnified.Checked) SelectedUnitColorMode = "Unified";
-                else SelectedUnitColorMode = "Inherit";
-                UpdateColorControlsState();
-                TriggerLiveTuning();
-            };
-
-            // Divisor 2
-            Panel div2 = new Panel { Location = new Point(18, 174), Size = new Size(card.Width - 36, 1), BackColor = clrBorder };
-            card.Controls.Add(div2);
-
-            // -------------------------------------------------------------
-            // Seção 3: Setas de Tráfego
-            // -------------------------------------------------------------
-            Label lblSecArr = new Label
-            {
-                Text = isPt ? "3. Setas de Tráfego:" : "3. Traffic Arrows:",
-                Font = new Font("Segoe UI", 9.0f, FontStyle.Bold),
-                ForeColor = clrAccent,
-                Location = new Point(18, 186),
-                AutoSize = true
-            };
-            card.Controls.Add(lblSecArr);
-
-            Panel pnlGrpArrow = new Panel { Location = new Point(205, 180), Size = new Size(295, 26), BackColor = Color.Transparent };
-            rbArrowUnified = new RadioButton
-            {
-                Text = isPt ? "Unificado" : "Unified",
-                Location = new Point(5, 4),
-                AutoSize = true,
-                ForeColor = clrTextMain,
-                Checked = SelectedArrowColorMode == "Unified"
-            };
-            rbArrowIndividual = new RadioButton
-            {
-                Text = isPt ? "Individual" : "Individual",
-                Location = new Point(105, 4),
-                AutoSize = true,
-                ForeColor = clrTextMain,
-                Checked = SelectedArrowColorMode == "Individual"
-            };
-            pnlGrpArrow.Controls.Add(rbArrowUnified);
-            pnlGrpArrow.Controls.Add(rbArrowIndividual);
-            card.Controls.Add(pnlGrpArrow);
-
-            btnColorArrowBoth = CreateColorButton(card, isPt ? "Ambas" : "Both", 18, 210, SelectedArrowColorUnified, (col) => {
-                SelectedArrowColorUnified = col;
-                btnColorArrowBoth.BackColor = col;
-                btnColorArrowBoth.ForeColor = GetContrastTextColor(col);
-                pnlLivePreview.Invalidate();
-                TriggerLiveTuning();
-            });
-
-            btnColorArrowUp = CreateColorButton(card, "Seta Up ▲", 180, 210, SelectedArrowColorUp, (col) => {
-                SelectedArrowColorUp = col;
-                btnColorArrowUp.BackColor = col;
-                btnColorArrowUp.ForeColor = GetContrastTextColor(col);
-                pnlLivePreview.Invalidate();
-                TriggerLiveTuning();
-            });
-
-            btnColorArrowDown = CreateColorButton(card, "Seta Down ▼", 342, 210, SelectedArrowColorDown, (col) => {
-                SelectedArrowColorDown = col;
-                btnColorArrowDown.BackColor = col;
-                btnColorArrowDown.ForeColor = GetContrastTextColor(col);
-                pnlLivePreview.Invalidate();
-                TriggerLiveTuning();
-            });
-
-            rbArrowUnified.CheckedChanged += (s, e) => {
-                SelectedArrowColorMode = rbArrowIndividual.Checked ? "Individual" : "Unified";
-                UpdateColorControlsState();
-                TriggerLiveTuning();
-            };
-            rbArrowIndividual.CheckedChanged += (s, e) => {
-                SelectedArrowColorMode = rbArrowIndividual.Checked ? "Individual" : "Unified";
-                UpdateColorControlsState();
-                TriggerLiveTuning();
-            };
-
-            // Divisor 3
-            Panel div3 = new Panel { Location = new Point(18, 256), Size = new Size(card.Width - 36, 1), BackColor = clrBorder };
-            card.Controls.Add(div3);
-
-            // -------------------------------------------------------------
-            // Seção 4: Presets Rápidos
-            // -------------------------------------------------------------
-            Label lblSecPresets = new Label
-            {
-                Text = isPt ? "4. Presets Rápidos:" : "4. Quick Presets:",
-                Font = new Font("Segoe UI", 9.0f, FontStyle.Bold),
-                ForeColor = clrAccent,
-                Location = new Point(18, 266),
-                AutoSize = true
-            };
-            card.Controls.Add(lblSecPresets);
-
-            btnPresetCiano = new Button
-            {
-                Text = isPt ? "Ciano & Verde" : "Cyan & Green",
-                Location = new Point(18, 290),
-                Size = new Size(112, 32),
-                FlatStyle = FlatStyle.Flat,
-                Font = new Font("Segoe UI", 8.0f, FontStyle.Regular),
-                BackColor = clrCardBg,
-                ForeColor = clrTextMain,
-                Cursor = Cursors.Hand,
-                Tag = "PresetBtn"
-            };
-            btnPresetCiano.FlatAppearance.BorderColor = clrBorder;
-            btnPresetCiano.Click += (s, e) => ApplyPreset("CianoVerde", isPt);
-            card.Controls.Add(btnPresetCiano);
-
-            btnPresetClassico = new Button
-            {
-                Text = isPt ? "Clássico Rede" : "Classic Net",
-                Location = new Point(138, 290),
-                Size = new Size(112, 32),
-                FlatStyle = FlatStyle.Flat,
-                Font = new Font("Segoe UI", 8.0f, FontStyle.Regular),
-                BackColor = clrCardBg,
-                ForeColor = clrTextMain,
-                Cursor = Cursors.Hand,
-                Tag = "PresetBtn"
-            };
-            btnPresetClassico.FlatAppearance.BorderColor = clrBorder;
-            btnPresetClassico.Click += (s, e) => ApplyPreset("ClassicoRede", isPt);
-            card.Controls.Add(btnPresetClassico);
-
-            btnPresetPadrao = new Button
-            {
-                Text = isPt ? "Padrão Win11" : "Win11 Default",
-                Location = new Point(258, 290),
-                Size = new Size(112, 32),
-                FlatStyle = FlatStyle.Flat,
-                Font = new Font("Segoe UI", 8.0f, FontStyle.Regular),
-                BackColor = clrCardBg,
-                ForeColor = clrTextMain,
-                Cursor = Cursors.Hand,
-                Tag = "PresetBtn"
-            };
-            btnPresetPadrao.FlatAppearance.BorderColor = clrBorder;
-            btnPresetPadrao.Click += (s, e) => ApplyPreset("PadraoWin11", isPt);
-            card.Controls.Add(btnPresetPadrao);
-
-            btnPresetMono = new Button
-            {
-                Text = isPt ? "Monocromático" : "Monochrome",
-                Location = new Point(378, 290),
-                Size = new Size(112, 32),
-                FlatStyle = FlatStyle.Flat,
-                Font = new Font("Segoe UI", 8.0f, FontStyle.Regular),
-                BackColor = clrCardBg,
-                ForeColor = clrTextMain,
-                Cursor = Cursors.Hand,
-                Tag = "PresetBtn"
-            };
-            btnPresetMono.FlatAppearance.BorderColor = clrBorder;
-            btnPresetMono.Click += (s, e) => ApplyPreset("Monocromatico", isPt);
-            card.Controls.Add(btnPresetMono);
-
-            Label lblColorTip = new Label
-            {
-                Text = isPt ?
-                    "Clique em um preset acima para aplicar instantaneamente, ou personalize nos botões." :
-                    "Click a preset above to apply instantly, or customize using the buttons above.",
-                Font = new Font("Segoe UI", 7.5f, FontStyle.Regular),
-                ForeColor = clrTextSub,
-                Location = new Point(18, 332),
-                AutoSize = true
-            };
-            card.Controls.Add(lblColorTip);
-
-            UpdateColorControlsState();
-        }
-
-        private void UpdateColorButtonDisplay(Button btn, string title, Color col)
-        {
-            if (btn == null) return;
-            btn.BackColor = col;
-            btn.ForeColor = GetContrastTextColor(col);
-            btn.Text = string.Format("{0}\n{1}", title, NetMonitorApp.ColorToHex(col));
-        }
-
-        private void ApplyPreset(string presetName, bool isPt)
-        {
-            if (presetName == "CianoVerde")
-            {
-                rbTextIndividual.Checked = true;
-                SelectedTextColorMode = "Individual";
-                SelectedTextColorUp = ColorTranslator.FromHtml("#00E5FF");
-                SelectedTextColorDown = ColorTranslator.FromHtml("#00E676");
-                UpdateColorButtonDisplay(btnColorTextUp, "Upload ▲", SelectedTextColorUp);
-                UpdateColorButtonDisplay(btnColorTextDown, "Download ▼", SelectedTextColorDown);
-
-                rbArrowIndividual.Checked = true;
-                SelectedArrowColorMode = "Individual";
-                SelectedArrowColorUp = SelectedTextColorUp;
-                SelectedArrowColorDown = SelectedTextColorDown;
-                UpdateColorButtonDisplay(btnColorArrowUp, "Seta Up ▲", SelectedArrowColorUp);
-                UpdateColorButtonDisplay(btnColorArrowDown, "Seta Down ▼", SelectedArrowColorDown);
-
-                rbUnitInherit.Checked = true;
-                SelectedUnitColorMode = "Inherit";
-            }
-            else if (presetName == "ClassicoRede")
-            {
-                rbTextIndividual.Checked = true;
-                SelectedTextColorMode = "Individual";
-                SelectedTextColorUp = ColorTranslator.FromHtml("#00E676");
-                SelectedTextColorDown = ColorTranslator.FromHtml("#FF5252");
-                UpdateColorButtonDisplay(btnColorTextUp, "Upload ▲", SelectedTextColorUp);
-                UpdateColorButtonDisplay(btnColorTextDown, "Download ▼", SelectedTextColorDown);
-
-                rbArrowIndividual.Checked = true;
-                SelectedArrowColorMode = "Individual";
-                SelectedArrowColorUp = SelectedTextColorUp;
-                SelectedArrowColorDown = SelectedTextColorDown;
-                UpdateColorButtonDisplay(btnColorArrowUp, "Seta Up ▲", SelectedArrowColorUp);
-                UpdateColorButtonDisplay(btnColorArrowDown, "Seta Down ▼", SelectedArrowColorDown);
-
-                rbUnitInherit.Checked = true;
-                SelectedUnitColorMode = "Inherit";
-            }
-            else if (presetName == "PadraoWin11")
-            {
-                rbTextUnified.Checked = true;
-                SelectedTextColorMode = "Unified";
-                SelectedTextColorUnified = Color.FromArgb(255, 255, 255);
-                UpdateColorButtonDisplay(btnColorTextBoth, isPt ? "Ambos" : "Both", SelectedTextColorUnified);
-
-                rbArrowUnified.Checked = true;
-                SelectedArrowColorMode = "Unified";
-                SelectedArrowColorUnified = Color.FromArgb(235, 235, 235);
-                UpdateColorButtonDisplay(btnColorArrowBoth, isPt ? "Ambas" : "Both", SelectedArrowColorUnified);
-
-                rbUnitInherit.Checked = true;
-                SelectedUnitColorMode = "Inherit";
-            }
-            else if (presetName == "Monocromatico")
-            {
-                rbTextIndividual.Checked = true;
-                SelectedTextColorMode = "Individual";
-                SelectedTextColorUp = Color.FromArgb(255, 255, 255);
-                SelectedTextColorDown = Color.FromArgb(176, 176, 176);
-                UpdateColorButtonDisplay(btnColorTextUp, "Upload ▲", SelectedTextColorUp);
-                UpdateColorButtonDisplay(btnColorTextDown, "Download ▼", SelectedTextColorDown);
-
-                rbArrowIndividual.Checked = true;
-                SelectedArrowColorMode = "Individual";
-                SelectedArrowColorUp = SelectedTextColorUp;
-                SelectedArrowColorDown = SelectedTextColorDown;
-                UpdateColorButtonDisplay(btnColorArrowUp, "Seta Up ▲", SelectedArrowColorUp);
-                UpdateColorButtonDisplay(btnColorArrowDown, "Seta Down ▼", SelectedArrowColorDown);
-
-                rbUnitInherit.Checked = true;
-                SelectedUnitColorMode = "Inherit";
-            }
-
-            UpdateColorControlsState();
-            if (pnlLivePreview != null) pnlLivePreview.Invalidate();
-            TriggerLiveTuning();
-        }
-
-        private void UpdateColorControlsState()
-        {
-            if (rbTextUnified == null || btnColorTextBoth == null || btnColorTextUp == null || btnColorTextDown == null ||
-                rbUnitInherit == null || btnColorUnitBoth == null || btnColorUnitUp == null || btnColorUnitDown == null ||
-                rbArrowUnified == null || btnColorArrowBoth == null || btnColorArrowUp == null || btnColorArrowDown == null)
-            {
-                return;
-            }
-
-            bool isTextUni = rbTextUnified.Checked;
-            btnColorTextBoth.Enabled = isTextUni;
-            btnColorTextUp.Enabled = !isTextUni;
-            btnColorTextDown.Enabled = !isTextUni;
-
-            bool isUnitInh = rbUnitInherit.Checked;
-            bool isUnitUni = rbUnitUnified.Checked;
-            btnColorUnitBoth.Enabled = isUnitUni;
-            btnColorUnitUp.Enabled = (!isUnitInh && !isUnitUni);
-            btnColorUnitDown.Enabled = (!isUnitInh && !isUnitUni);
-
-            bool isArrUni = rbArrowUnified.Checked;
-            btnColorArrowBoth.Enabled = isArrUni;
-            btnColorArrowUp.Enabled = !isArrUni;
-            btnColorArrowDown.Enabled = !isArrUni;
-
-            if (pnlLivePreview != null) pnlLivePreview.Invalidate();
-        }
-
-        private Button CreateColorButton(Panel parent, string title, int left, int top, Color initialColor, Action<Color> onColorChanged)
-        {
-            Button btn = new Button
-            {
-                Text = string.Format("{0}\n{1}", title, NetMonitorApp.ColorToHex(initialColor)),
-                Location = new Point(left, top),
-                Size = new Size(150, 36),
-                FlatStyle = FlatStyle.Flat,
-                Font = new Font("Segoe UI", 8.0f, FontStyle.Bold),
-                BackColor = initialColor,
-                ForeColor = GetContrastTextColor(initialColor),
-                Cursor = Cursors.Hand,
-                Tag = "ColorSwatch"
-            };
-            btn.FlatAppearance.BorderColor = clrBorder;
-            btn.Click += (s, e) =>
-            {
-                using (ColorDialog cd = new ColorDialog())
-                {
-                    cd.Color = btn.BackColor;
-                    cd.FullOpen = true;
-                    if (cd.ShowDialog() == DialogResult.OK)
-                    {
-                        btn.Text = string.Format("{0}\n{1}", title, NetMonitorApp.ColorToHex(cd.Color));
-                        onColorChanged(cd.Color);
-                    }
-                }
-            };
-            parent.Controls.Add(btn);
-            return btn;
-        }
-
-        private static Color GetContrastTextColor(Color bg)
-        {
-            double brightness = (bg.R * 0.299 + bg.G * 0.587 + bg.B * 0.114);
-            return brightness > 140 ? Color.FromArgb(20, 20, 20) : Color.FromArgb(250, 250, 250);
-        }
-
-        // ==============================================================================
-        // PÁGINA 4: ÍCONES E MODELOS DE SETAS
-        // ==============================================================================
-        private void BuildPageIcones(Panel card, bool isPt)
-        {
-            CreateLabel(card, isPt ? "Modelo Visual das Setas:" : "Arrow Visual Model:", 20, 20);
-            cbTemplate = CreateComboBox(card, 20, 46, 472);
-            cbTemplate.Items.AddRange(new object[] {
-                isPt ? "Triângulos Modernos (▲ / ▼) [Vetor Limpo Padrão]" : "Modern Triangles (▲ / ▼) [Clean Vector Default]",
-                isPt ? "Chevrons Fluent (⌃ / ⌄) [Vetor Linha]" : "Fluent Chevrons (⌃ / ⌄) [Vector Outline]",
-                isPt ? "Chevrons Duplos Velocidade (▲▲ / ▼▼) [Novo]" : "Dual Speed Chevrons (▲▲ / ▼▼) [New]",
-                isPt ? "Stream Tech Diagonal (↗ / ↘) [Novo]" : "Stream Tech Diagonal (↗ / ↘) [New]",
-                isPt ? "Clássico Unicode (▲ / ▼)" : "Classic Unicode (▲ / ▼)",
-                isPt ? "Personalizado (Digite caracteres próprios)" : "Custom (Enter custom characters)"
-            });
-
-            if (SelectedIconTemplate == "VectorTriangle") cbTemplate.SelectedIndex = 0;
-            else if (SelectedIconTemplate == "VectorChevron") cbTemplate.SelectedIndex = 1;
-            else if (SelectedIconTemplate == "VectorDualChevron") cbTemplate.SelectedIndex = 2;
-            else if (SelectedIconTemplate == "StreamTech") cbTemplate.SelectedIndex = 3;
-            else if (SelectedIconTemplate == "UnicodeClassic") cbTemplate.SelectedIndex = 4;
-            else cbTemplate.SelectedIndex = 5;
-
-            // Divisor
-            Panel div = new Panel { Location = new Point(20, 96), Size = new Size(card.Width - 40, 1), BackColor = clrBorder };
-            card.Controls.Add(div);
-
-            // Caracteres Personalizados
-            lblUp = CreateLabel(card, isPt ? "Caractere Upload:" : "Upload Character:", 20, 118);
-            txtUp = new TextBox
-            {
-                Location = new Point(180, 116),
-                Size = new Size(140, 24),
-                BackColor = clrInputBg,
-                ForeColor = clrTextMain,
-                Text = SelectedCustomUpChar
-            };
-            card.Controls.Add(lblUp);
-            card.Controls.Add(txtUp);
-
-            lblDown = CreateLabel(card, isPt ? "Caractere Download:" : "Download Character:", 20, 158);
-            txtDown = new TextBox
-            {
-                Location = new Point(180, 156),
-                Size = new Size(140, 24),
-                BackColor = clrInputBg,
-                ForeColor = clrTextMain,
-                Text = SelectedCustomDownChar
-            };
-            card.Controls.Add(lblDown);
-            card.Controls.Add(txtDown);
-
-            txtUp.TextChanged += (s, e) => {
-                SelectedCustomUpChar = txtUp.Text;
-                pnlLivePreview.Invalidate();
-                TriggerLiveTuning();
-            };
-            txtDown.TextChanged += (s, e) => {
-                SelectedCustomDownChar = txtDown.Text;
-                pnlLivePreview.Invalidate();
-                TriggerLiveTuning();
-            };
-
-            cbTemplate.SelectedIndexChanged += (s, e) =>
-            {
-                int idx = cbTemplate.SelectedIndex;
-                if (idx == 0) SelectedIconTemplate = "VectorTriangle";
-                else if (idx == 1) SelectedIconTemplate = "VectorChevron";
-                else if (idx == 2) SelectedIconTemplate = "VectorDualChevron";
-                else if (idx == 3) SelectedIconTemplate = "StreamTech";
-                else if (idx == 4) SelectedIconTemplate = "UnicodeClassic";
-                else SelectedIconTemplate = "UnicodeCustom";
-
-                bool isCustom = (idx == 5);
-                lblUp.Enabled = true;
-                lblUp.ForeColor = isCustom ? clrTextMain : clrTextSub;
-                txtUp.Enabled = isCustom;
-                lblDown.Enabled = true;
-                lblDown.ForeColor = isCustom ? clrTextMain : clrTextSub;
-                txtDown.Enabled = isCustom;
-
-                pnlLivePreview.Invalidate();
-                TriggerLiveTuning();
-            };
-
-            bool customInit = (cbTemplate.SelectedIndex == 5);
-            lblUp.Enabled = true;
-            lblUp.ForeColor = customInit ? clrTextMain : clrTextSub;
-            txtUp.Enabled = customInit;
-            lblDown.Enabled = true;
-            lblDown.ForeColor = customInit ? clrTextMain : clrTextSub;
-            txtDown.Enabled = customInit;
-
-            Label lblNote = new Label
-            {
-                Text = isPt ?
-                    "Os modelos vetoriais (Triângulos, Chevrons e Stream Tech) são renderizados matematicamente, garantindo máxima nitidez em qualquer escala de DPI sem pixelização." :
-                    "Vector models are rendered mathematically, ensuring maximum sharpness at any DPI scale.",
-                Font = new Font("Segoe UI", 7.5f, FontStyle.Regular),
-                ForeColor = clrTextSub,
-                Location = new Point(20, 220),
-                Size = new Size(card.Width - 40, 75)
-            };
-            card.Controls.Add(lblNote);
-        }
-
-        // ==============================================================================
-        // LIVE PREVIEW DINÂMICO
-        // ==============================================================================
-        private void PnlLivePreview_Paint(object sender, PaintEventArgs e)
-        {
-            Graphics g = e.Graphics;
-            Color previewBg = isDarkTheme ? NetMonitorApp.BG_COLOR_DARK : NetMonitorApp.BG_COLOR_LIGHT;
-            g.Clear(previewBg);
-            g.TextRenderingHint = TextRenderingHint.ClearTypeGridFit;
-            g.SmoothingMode = SmoothingMode.AntiAlias;
-
-            // Borda do preview
-            using (Pen p = new Pen(clrBorder, 1))
-            {
-                g.DrawRectangle(p, 0, 0, pnlLivePreview.Width - 1, pnlLivePreview.Height - 1);
-            }
-
-            Color cNumUp = rbTextIndividual.Checked ? btnColorTextUp.BackColor : btnColorTextBoth.BackColor;
-            Color cNumDown = rbTextIndividual.Checked ? btnColorTextDown.BackColor : btnColorTextBoth.BackColor;
-
-            Color cUnitUp;
-            Color cUnitDown;
-            if (rbUnitIndividual.Checked)
-            {
-                cUnitUp = btnColorUnitUp.BackColor;
-                cUnitDown = btnColorUnitDown.BackColor;
-            }
-            else if (rbUnitUnified.Checked)
-            {
-                cUnitUp = btnColorUnitBoth.BackColor;
-                cUnitDown = btnColorUnitBoth.BackColor;
-            }
-            else // Inherit
-            {
-                if (isDarkTheme)
-                {
-                    cUnitUp = Color.FromArgb((int)(cNumUp.R * 0.85f), (int)(cNumUp.G * 0.85f), (int)(cNumUp.B * 0.85f));
-                    cUnitDown = Color.FromArgb((int)(cNumDown.R * 0.85f), (int)(cNumDown.G * 0.85f), (int)(cNumDown.B * 0.85f));
-                }
-                else
-                {
-                    cUnitUp = Color.FromArgb(Math.Min(255, (int)(cNumUp.R + 45)), Math.Min(255, (int)(cNumUp.G + 45)), Math.Min(255, (int)(cNumUp.B + 45)));
-                    cUnitDown = Color.FromArgb(Math.Min(255, (int)(cNumDown.R + 45)), Math.Min(255, (int)(cNumDown.G + 45)), Math.Min(255, (int)(cNumDown.B + 45)));
-                }
-            }
-
-            Color cArrUp = rbArrowIndividual.Checked ? btnColorArrowUp.BackColor : btnColorArrowBoth.BackColor;
-            Color cArrDown = rbArrowIndividual.Checked ? btnColorArrowDown.BackColor : btnColorArrowBoth.BackColor;
-
-            Font fNum = null;
-            Font fUnit = null;
-            Font fUni = null;
-            try
-            {
-                fNum = new Font(SelectedFontFamily, SelectedFontSize, SelectedFontStyle);
-            }
-            catch
-            {
-                fNum = new Font("Segoe UI", 9.5f, FontStyle.Bold);
-            }
-
-            try
-            {
-                float unitSz = Math.Max(7.0f, SelectedFontSize - 1.5f);
-                fUnit = new Font(SelectedFontFamily, unitSz, FontStyle.Regular);
-            }
-            catch
-            {
-                fUnit = new Font("Segoe UI", 8.0f, FontStyle.Regular);
-            }
-            fUni = new Font("Segoe UI Symbol", 8.0f, FontStyle.Regular);
-
-            using (StringFormat sfR = new StringFormat { Alignment = StringAlignment.Far, LineAlignment = StringAlignment.Center })
-            using (StringFormat sfL = new StringFormat { Alignment = StringAlignment.Near, LineAlignment = StringAlignment.Center })
-            using (StringFormat sfC = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center })
-            using (Brush bNumUp = new SolidBrush(cNumUp))
-            using (Brush bNumDown = new SolidBrush(cNumDown))
-            using (Brush bUnitUp = new SolidBrush(cUnitUp))
-            using (Brush bUnitDown = new SolidBrush(cUnitDown))
-            using (Brush bArrUp = new SolidBrush(cArrUp))
-            using (Brush bArrDown = new SolidBrush(cArrDown))
-            using (Pen pArrUp = new Pen(cArrUp, 1.4f))
-            using (Pen pArrDown = new Pen(cArrDown, 1.4f))
-            {
-                string unitStr = (SelectedSpeedUnitFormat == "Bytes") ? "MB/s" : "Kbps";
-
-                if (SelectedArrowOnRight)
-                {
-                    RectangleF rUpNum = new RectangleF(2, 2, 52, 18);
-                    RectangleF rDnNum = new RectangleF(2, 21, 52, 18);
-                    g.DrawString("823.6", fNum, bNumUp, rUpNum, sfR);
-                    g.DrawString("142.0", fNum, bNumDown, rDnNum, sfR);
-
-                    RectangleF rUpU = new RectangleF(56, 2, 42, 18);
-                    RectangleF rDnU = new RectangleF(56, 21, 42, 18);
-                    g.DrawString(unitStr, fUnit, bUnitUp, rUpU, sfL);
-                    g.DrawString(unitStr, fUnit, bUnitDown, rDnU, sfL);
-
-                    DrawPreviewArrow(g, 106.0f, bArrUp, bArrDown, pArrUp, pArrDown, fUni, sfC);
-                }
-                else
-                {
-                    DrawPreviewArrow(g, 10.0f, bArrUp, bArrDown, pArrUp, pArrDown, fUni, sfC);
-
-                    RectangleF rUpNum = new RectangleF(20, 2, 48, 18);
-                    RectangleF rDnNum = new RectangleF(20, 21, 48, 18);
-                    g.DrawString("823.6", fNum, bNumUp, rUpNum, sfR);
-                    g.DrawString("142.0", fNum, bNumDown, rDnNum, sfR);
-
-                    RectangleF rUpU = new RectangleF(70, 2, 44, 18);
-                    RectangleF rDnU = new RectangleF(70, 21, 44, 18);
-                    g.DrawString(unitStr, fUnit, bUnitUp, rUpU, sfL);
-                    g.DrawString(unitStr, fUnit, bUnitDown, rDnU, sfL);
-                }
-            }
-
-            if (fNum != null) fNum.Dispose();
-            if (fUnit != null) fUnit.Dispose();
-            if (fUni != null) fUni.Dispose();
-        }
-
-        private void DrawPreviewArrow(Graphics g, float cx, Brush bUp, Brush bDown, Pen pUp, Pen pDown, Font fUni, StringFormat sfC)
-        {
-            if (SelectedIconTemplate == "VectorTriangle")
-            {
-                g.FillPolygon(bUp, new PointF[] {
-                    new PointF(cx, 6.0f), new PointF(cx - 3.8f, 11.0f), new PointF(cx + 3.8f, 11.0f)
-                });
-                g.FillPolygon(bDown, new PointF[] {
-                    new PointF(cx, 34.0f), new PointF(cx - 3.8f, 29.0f), new PointF(cx + 3.8f, 29.0f)
-                });
-            }
-            else if (SelectedIconTemplate == "VectorChevron")
-            {
-                g.DrawLines(pUp, new PointF[] {
-                    new PointF(cx - 3.8f, 10.5f), new PointF(cx, 6.5f), new PointF(cx + 3.8f, 10.5f)
-                });
-                g.DrawLines(pDown, new PointF[] {
-                    new PointF(cx - 3.8f, 29.0f), new PointF(cx, 33.0f), new PointF(cx + 3.8f, 29.0f)
-                });
-            }
-            else if (SelectedIconTemplate == "VectorDualChevron")
-            {
-                g.DrawLines(pUp, new PointF[] { new PointF(cx - 3.5f, 7.5f), new PointF(cx, 4.5f), new PointF(cx + 3.5f, 7.5f) });
-                g.DrawLines(pUp, new PointF[] { new PointF(cx - 3.5f, 11.5f), new PointF(cx, 8.5f), new PointF(cx + 3.5f, 11.5f) });
-                g.DrawLines(pDown, new PointF[] { new PointF(cx - 3.5f, 27.5f), new PointF(cx, 30.5f), new PointF(cx + 3.5f, 27.5f) });
-                g.DrawLines(pDown, new PointF[] { new PointF(cx - 3.5f, 31.0f), new PointF(cx, 34.0f), new PointF(cx + 3.5f, 31.0f) });
-            }
-            else if (SelectedIconTemplate == "StreamTech")
-            {
-                g.DrawLine(pUp, cx - 3.5f, 11.5f, cx + 3.0f, 5.5f);
-                g.DrawLines(pUp, new PointF[] { new PointF(cx - 1.0f, 5.5f), new PointF(cx + 3.0f, 5.5f), new PointF(cx + 3.0f, 9.5f) });
-                g.DrawLine(pDown, cx - 3.5f, 27.5f, cx + 3.0f, 33.5f);
-                g.DrawLines(pDown, new PointF[] { new PointF(cx + 3.0f, 29.5f), new PointF(cx + 3.0f, 33.5f), new PointF(cx - 1.0f, 33.5f) });
-            }
-            else
-            {
-                string upCh = NetMonitorApp.ParseUnicodeString(SelectedCustomUpChar, "▲");
-                string downCh = NetMonitorApp.ParseUnicodeString(SelectedCustomDownChar, "▼");
-                g.DrawString(upCh, fUni, bUp, new RectangleF(cx - 8, 2, 16, 18), sfC);
-                g.DrawString(downCh, fUni, bDown, new RectangleF(cx - 8, 21, 16, 18), sfC);
-            }
-        }
-
-        // ==============================================================================
-        // HELPERS DE CRIAÇÃO VISUAL
-        // ==============================================================================
-        private Panel CreateCard(Panel parent, int left, int top, int width, int height)
-        {
-            Panel card = new Panel
-            {
-                Location = new Point(left, top),
-                Size = new Size(width, height),
-                BackColor = clrCardBg
-            };
-            card.Paint += (s, e) =>
-            {
-                using (Pen p = new Pen(clrBorder, 1))
-                {
-                    e.Graphics.DrawRectangle(p, 0, 0, card.Width - 1, card.Height - 1);
-                }
-            };
-            parent.Controls.Add(card);
-            return card;
-        }
-
-        private Label CreateLabel(Panel parent, string text, int left, int top)
-        {
-            Label lbl = new Label
-            {
-                Text = text,
-                Location = new Point(left, top),
-                AutoSize = true,
-                ForeColor = clrTextMain,
-                Font = new Font("Segoe UI", 9.0f, FontStyle.Regular),
-                UseMnemonic = false
-            };
-            parent.Controls.Add(lbl);
-            return lbl;
-        }
-
-        private ComboBox CreateComboBox(Panel parent, int left, int top, int width)
-        {
-            ComboBox cb = new ComboBox
-            {
-                Location = new Point(left, top),
-                Width = width,
-                DropDownStyle = ComboBoxStyle.DropDownList,
-                BackColor = clrInputBg,
-                ForeColor = clrTextMain,
-                FlatStyle = FlatStyle.Flat
-            };
-            parent.Controls.Add(cb);
-            return cb;
-        }
-
-        protected override void OnFormClosing(FormClosingEventArgs e)
-        {
-            try
-            {
-                SystemEvents.UserPreferenceChanged -= OnThemeChanged;
-            }
-            catch { }
-            base.OnFormClosing(e);
-        }
-
-        private void BtnSave_Click(object sender, EventArgs e)
-        {
-            this.DialogResult = DialogResult.OK;
-
-            SelectedLanguage = (cbLang.SelectedIndex == 0) ? "pt" : "en";
-            SelectedSpeedUnitFormat = (cbFormat.SelectedIndex == 1) ? "Bytes" : "Bits";
-
-            if (cbUnits.SelectedIndex == 0) SelectedUnitMode = "Auto";
-            else SelectedUnitMode = cbUnits.SelectedItem.ToString();
-
-            SelectedArrowOnRight = rbRight.Checked;
-            SelectedIsLocked = chkLock.Checked;
-            SelectedHideOnScreensaver = chkScreensaver.Checked;
-            SelectedShowHoverFlyout = chkHoverFlyout.Checked;
-            parentApp.showHoverFlyout = SelectedShowHoverFlyout;
-
-            SelectedFontFamily = cbFontFamily.SelectedItem != null ? cbFontFamily.SelectedItem.ToString() : "Segoe UI Variable Display";
-
-            float[] sizes = new float[] { 8.0f, 8.5f, 9.0f, 9.5f, 10.0f, 10.5f, 11.0f, 12.0f };
-            int sIdx = cbFontSize.SelectedIndex;
-            SelectedFontSize = (sIdx >= 0 && sIdx < sizes.Length) ? sizes[sIdx] : 9.5f;
-
-            if (cbFontStyle.SelectedIndex == 1) SelectedFontStyle = FontStyle.Bold;
-            else if (cbFontStyle.SelectedIndex == 2) SelectedFontStyle = FontStyle.Italic;
-            else SelectedFontStyle = FontStyle.Regular;
-
-            // Cores Números
-            SelectedTextColorMode = rbTextIndividual.Checked ? "Individual" : "Unified";
-            SelectedTextColorUnified = btnColorTextBoth.BackColor;
-            SelectedTextColorUp = btnColorTextUp.BackColor;
-            SelectedTextColorDown = btnColorTextDown.BackColor;
-
-            // Cores Unidades
-            if (rbUnitIndividual.Checked) SelectedUnitColorMode = "Individual";
-            else if (rbUnitUnified.Checked) SelectedUnitColorMode = "Unified";
-            else SelectedUnitColorMode = "Inherit";
-
-            SelectedUnitColorUnified = btnColorUnitBoth.BackColor;
-            SelectedUnitColorUp = btnColorUnitUp.BackColor;
-            SelectedUnitColorDown = btnColorUnitDown.BackColor;
-
-            // Cores Setas
-            SelectedArrowColorMode = rbArrowIndividual.Checked ? "Individual" : "Unified";
-            SelectedArrowColorUnified = btnColorArrowBoth.BackColor;
-            SelectedArrowColorUp = btnColorArrowUp.BackColor;
-            SelectedArrowColorDown = btnColorArrowDown.BackColor;
-
-            // Modelos de Ícones
-            int tIdx = cbTemplate.SelectedIndex;
-            if (tIdx == 0) SelectedIconTemplate = "VectorTriangle";
-            else if (tIdx == 1) SelectedIconTemplate = "VectorChevron";
-            else if (tIdx == 2) SelectedIconTemplate = "VectorDualChevron";
-            else if (tIdx == 3) SelectedIconTemplate = "StreamTech";
-            else if (tIdx == 4) SelectedIconTemplate = "UnicodeClassic";
-            else SelectedIconTemplate = "UnicodeCustom";
-
-            SelectedCustomUpChar = NetMonitorApp.ParseUnicodeString(txtUp.Text, "▲");
-            SelectedCustomDownChar = NetMonitorApp.ParseUnicodeString(txtDown.Text, "▼");
-
-            this.Close();
-        }
-    }
 }
