@@ -1,4 +1,4 @@
-# ==============================================================================
+﻿# ==============================================================================
 # NetMonitor - Copia e Sincronizacao para o Google Drive
 # Move arquivos legados do Drive para _backups sem apagar nada
 # e sincroniza release oficial, docs, design e handoff.

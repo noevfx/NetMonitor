@@ -1,7 +1,8 @@
-﻿### ðŸ›¡ï¸ VerificaÃ§Ã£o de Integridade CriptogrÃ¡fica (SHA-256) & SeguranÃ§a
+﻿### 🛡️ Verificação de Integridade Criptográfica (SHA-256) & Segurança
 
 | Arquivo | Tamanho | Hash SHA-256 | Auditoria VirusTotal |
 | :--- | :--- | :--- | :--- |
-| **`NetMonitor-Portable-v1.0.1.zip`** | 120.3 KB | `d494d428d7f7e0a1e6297024865f6e794703d7b7b3fc5fbe4b55b8637725ab68` | [Auditado no VirusTotal](https://www.virustotal.com/gui/file/d494d428d7f7e0a1e6297024865f6e794703d7b7b3fc5fbe4b55b8637725ab68) |
-| **`NetMonitor-v1.0.1.zip`** | 304.6 KB | `568cff84314e4458f651d1b8dc30d71413faab4788a757b9aba9d8c992aa2502` | [Auditado no VirusTotal](https://www.virustotal.com/gui/file/568cff84314e4458f651d1b8dc30d71413faab4788a757b9aba9d8c992aa2502) |
-| **`NetMonitorSetup.exe`** | 360.5 KB | `1845b0838450f0a0b29c8ebd519dbae1986fd6498fdbea542346b50186b141c0` | [Auditado no VirusTotal](https://www.virustotal.com/gui/file/1845b0838450f0a0b29c8ebd519dbae1986fd6498fdbea542346b50186b141c0) |
+| **`NetMonitor-Portable-v1.0.1.zip`** | 121.2 KB | `105be0b858b255b1f273f83deefd02581e3d96f3b141f0369471aee8a556cdd8` | [0/66 Deteccoes (100% Limpo)](https://www.virustotal.com/gui/file/105be0b858b255b1f273f83deefd02581e3d96f3b141f0369471aee8a556cdd8) |
+| **`NetMonitor-v1.0.1.zip`** | 306.1 KB | `66a3ac92ebe030a5ed0504ee28e3839bc860cfff91d1ebfeb5a431c0e6c89a31` | [0/53 Deteccoes (100% Limpo)](https://www.virustotal.com/gui/file/66a3ac92ebe030a5ed0504ee28e3839bc860cfff91d1ebfeb5a431c0e6c89a31) |
+| **`NetMonitorSetup.exe`** | 360.5 KB | `2ec62ea9ec68f48992938db7093cc07d051f7934b64d7631b01ed00c2d5ca14c` | [3/65 (Heuristica/Nao assinado)](https://www.virustotal.com/gui/file/2ec62ea9ec68f48992938db7093cc07d051f7934b64d7631b01ed00c2d5ca14c) |
+| **`NetMonitor.exe`** | 229.5 KB | `d62baa4e6a01239e0f581cc87a110532f99c8ab3c6ee370a9c361f2ca04c8818` | [2/69 (Heuristica/Nao assinado)](https://www.virustotal.com/gui/file/d62baa4e6a01239e0f581cc87a110532f99c8ab3c6ee370a9c361f2ca04c8818) |

@@ -1,6 +1,8 @@
-# Generate SHA-256 Hashes and Query VirusTotal API for NetMonitor Releases
+﻿# Generate SHA-256 Hashes and Query VirusTotal API for NetMonitor Releases
+# -Upload: envia ao VirusTotal os arquivos que ele ainda não conhece e espera a análise terminar
 param(
-    [string]$Version = ""
+    [string]$Version = "",
+    [switch]$Upload
 )
 
 $ErrorActionPreference = "Stop"
@@ -36,18 +38,37 @@ if (-not $apiKey) {
 
 Write-Host "Calculando hashes SHA-256 e consultando VirusTotal para NetMonitor v$Version..." -ForegroundColor Cyan
 
-$files = Get-ChildItem -Path $releaseDir -File | Where-Object { $_.Extension -in ".exe", ".zip" }
+$files = @(Get-ChildItem -Path $releaseDir -File | Where-Object { $_.Extension -in ".exe", ".zip" })
+$portableExe = Join-Path $releaseDir "NetMonitor Portable\NetMonitor.exe"
+if (Test-Path $portableExe) { $files += Get-Item $portableExe }
 $table = @()
+$headers = @{ "x-apikey" = $apiKey; "User-Agent" = "NetMonitor-Release-Verifier/1.0" }
 
 foreach ($f in $files) {
     $hash = (Get-FileHash -Path $f.FullName -Algorithm SHA256).Hash.ToLower()
     $sizeKb = [math]::Round($f.Length / 1KB, 1)
     $vtLink = "https://www.virustotal.com/gui/file/$hash"
-    $statusText = "Auditado no VirusTotal"
-    
+    $statusText = "Ainda nao enviado"
+
+    if ($apiKey -and $Upload) {
+        $known = $true
+        try { Invoke-RestMethod -Uri "https://www.virustotal.com/api/v3/files/$hash" -Headers $headers -Method Get -TimeoutSec 15 | Out-Null } catch { $known = $false }
+        if (-not $known) {
+            Write-Host "  Enviando $($f.Name) ao VirusTotal..." -ForegroundColor Yellow
+            # curl.exe: o Invoke-RestMethod do PowerShell 5.1 não envia multipart
+            $resp = & curl.exe -s -X POST "https://www.virustotal.com/api/v3/files" -H "x-apikey: $apiKey" -F "file=@$($f.FullName)" | ConvertFrom-Json
+            $aid = $resp.data.id
+            # API pública: 4 requisições/min; a análise costuma levar 1 a 3 minutos
+            for ($i = 0; $i -lt 20 -and $aid; $i++) {
+                Start-Sleep -Seconds 20
+                try { $an = Invoke-RestMethod -Uri "https://www.virustotal.com/api/v3/analyses/$aid" -Headers $headers -TimeoutSec 15 } catch { continue }
+                if ($an.data.attributes.status -eq "completed") { break }
+            }
+        }
+    }
+
     if ($apiKey) {
         try {
-            $headers = @{ "x-apikey" = $apiKey; "User-Agent" = "NetMonitor-Release-Verifier/1.0" }
             $res = Invoke-RestMethod -Uri "https://www.virustotal.com/api/v3/files/$hash" -Headers $headers -Method Get -TimeoutSec 10 -ErrorAction SilentlyContinue
             if ($res -and $res.data -and $res.data.attributes -and $res.data.attributes.last_analysis_stats) {
                 $stats = $res.data.attributes.last_analysis_stats

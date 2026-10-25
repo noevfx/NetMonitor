@@ -1,4 +1,4 @@
-# Compila e executa o harness de validação visual (gera PNGs em bin\shots).
+﻿# Compila e executa o harness de validação visual (gera PNGs em bin\shots).
 $ErrorActionPreference = "Stop"
 $root = Split-Path $PSScriptRoot -Parent
 $csc = "C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe"

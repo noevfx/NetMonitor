@@ -134,6 +134,28 @@ Todas as telas são geradas por `scripts\build_rendertest.ps1 -Gallery`.
 
 **Requisitos:** Windows 11 ou 10, .NET Framework 4.8 (já vem no Windows).
 
+> [!NOTE]
+> No primeiro uso, o Windows pode exibir o aviso do **SmartScreen** por ser um app independente novo, ainda sem assinatura digital. Clique em **Mais informações** e depois em **Executar assim mesmo**.
+
+---
+
+## Segurança
+
+O NetMonitor é código aberto (MIT), não coleta dados e não acessa a internet: só lê os contadores de rede do próprio Windows. Confira se o arquivo que você baixou é o original comparando o SHA-256:
+
+```powershell
+Get-FileHash .\NetMonitorSetup.exe -Algorithm SHA256
+```
+
+<!-- hashes:start -->
+| Arquivo (v1.0.1) | SHA-256 | VirusTotal |
+| :--- | :--- | :--- |
+| `NetMonitorSetup.exe` | `2ec62ea9ec68f48992938db7093cc07d051f7934b64d7631b01ed00c2d5ca14c` | [relatório](https://www.virustotal.com/gui/file/2ec62ea9ec68f48992938db7093cc07d051f7934b64d7631b01ed00c2d5ca14c) |
+| `NetMonitor.exe` | `d62baa4e6a01239e0f581cc87a110532f99c8ab3c6ee370a9c361f2ca04c8818` | [relatório](https://www.virustotal.com/gui/file/d62baa4e6a01239e0f581cc87a110532f99c8ab3c6ee370a9c361f2ca04c8818) |
+<!-- hashes:end -->
+
+Os hashes dos zips e o resultado completo do VirusTotal ficam nas notas de cada release. Executáveis novos sem assinatura digital podem receber alertas de motores de *machine learning* (nomes terminados em `!ml` ou "ml.score"), que avaliam o formato do arquivo, não um vírus conhecido. O relatório completo de cada arquivo está nos links acima.
+
 ---
 
 ## Compilar
