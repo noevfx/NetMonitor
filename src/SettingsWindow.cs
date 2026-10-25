@@ -1217,7 +1217,7 @@ namespace NetMonitor.Ui
             Btn copyMail = new Btn("Copiar", false, 11, new Thickness(12, 6, 12, 6), "acao-copiar");
             copyMail.Click = delegate { CopyText("labs@noevfx.com"); copyMail.Text = "✓ Copiado!"; Later(3000, delegate { copyMail.Text = "Copiar"; }); Toast("E-mail labs@noevfx.com copiado!"); };
             Btn openMail = new Btn("Abrir no E-mail", true, 11, new Thickness(14, 6, 14, 6), "link-externo");
-            openMail.Click = delegate { try { Process.Start("mailto:labs@noevfx.com?subject=Feedback%20NetMonitor%20v1.0.0"); } catch { } };
+            openMail.Click = delegate { try { Process.Start("mailto:labs@noevfx.com?subject=Feedback%20NetMonitor%20v" + AppVersion.Text); } catch { } };
             Border mailRow = new Border { Background = K.B("swatch"), CornerRadius = new CornerRadius(8), Padding = new Thickness(14), Child = K.LR(K.H(8, new Ico("sobre-email", 18, "acc"), K.T("labs@noevfx.com", 13, FontWeights.Bold, "text")), K.H(8, copyMail, openMail)) };
             TextBlock mailTx = K.Wrap(K.T("Sua opinião molda o futuro do NetMonitor. Encontrou algum bug, tem sugestões para a próxima versão, dúvidas de configuração ou críticas construtivas? Mande um e-mail diretamente para:", 11, "sub"));
             mailTx.LineHeight = 18;

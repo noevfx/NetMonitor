@@ -8,10 +8,10 @@
 
 [![Windows 11](https://img.shields.io/badge/Windows-11%20%7C%2010-0078d4?style=flat-square&logo=windows&logoColor=white)](https://github.com/eduardonoe/NetMonitor)
 [![.NET Framework](https://img.shields.io/badge/.NET%20Framework-4.8%20nativo-512bd4?style=flat-square&logo=dotnet&logoColor=white)](https://github.com/eduardonoe/NetMonitor)
-[![Versão](https://img.shields.io/badge/Versão-1.0.0-success?style=flat-square)](https://github.com/eduardonoe/NetMonitor/releases/tag/v1.0.0)
+[![Versão](https://img.shields.io/badge/Versão-1.0.1-success?style=flat-square)](https://github.com/eduardonoe/NetMonitor/releases/tag/v1.0.1)
 [![Licença](https://img.shields.io/badge/Licença-MIT-blue?style=flat-square)](LICENSE)
 
-[**Instalador (.exe)**](https://github.com/eduardonoe/NetMonitor/releases/download/v1.0.0/NetMonitorSetup.exe) &nbsp;|&nbsp; [**Portátil (.zip)**](https://github.com/eduardonoe/NetMonitor/releases/download/v1.0.0/NetMonitor-Portable-v1.0.0.zip) &nbsp;|&nbsp; [**Pacote completo (.zip)**](https://github.com/eduardonoe/NetMonitor/releases/download/v1.0.0/NetMonitor-v1.0.0.zip)
+[**Instalador (.exe)**](https://github.com/eduardonoe/NetMonitor/releases/download/v1.0.1/NetMonitorSetup.exe) &nbsp;|&nbsp; [**Portátil (.zip)**](https://github.com/eduardonoe/NetMonitor/releases/download/v1.0.1/NetMonitor-Portable-v1.0.1.zip) &nbsp;|&nbsp; [**Pacote completo (.zip)**](https://github.com/eduardonoe/NetMonitor/releases/download/v1.0.1/NetMonitor-v1.0.1.zip)
 
 </div>
 
@@ -42,6 +42,7 @@ Os dois conversam por mensagens do Windows (`WM_COPYDATA`): a janela mostra a pr
 - Fundo **transparente**, **acrílico** ou **sólido**, com borda opcional.
 - Unidades em **bits** (Kbps / Mbps / Gbps) ou **bytes** (KB/s / MB/s / GB/s), escala **automática** ou **individual** por sentido; a unidade pode ser ocultada.
 - Clique com o botão direito em qualquer ponto do widget abre o menu (não só em cima do texto).
+- Acompanha a barra de tarefas: some em tela cheia (F11, jogos, vídeos, preview do Premiere/After Effects) e quando a barra se oculta automaticamente.
 - Some sozinho com o protetor de tela ou com o Windows bloqueado.
 
 ### Cores & tema
@@ -129,7 +130,7 @@ Todas as telas são geradas por `scripts\build_rendertest.ps1 -Gallery`.
 ## Instalação
 
 1. **Instalador** (`NetMonitorSetup.exe`): instala em `%LocalAppData%\Programs\NetMonitor` (sem administrador), cria atalhos e o desinstalador.
-2. **Portátil** (`NetMonitor-Portable-v1.0.0.zip`): descompacte e abra `NetMonitor.exe`. As preferências ficam em `HKCU\Software\NetMonitor`.
+2. **Portátil** (`NetMonitor-Portable-v1.0.1.zip`): descompacte e abra `NetMonitor.exe`. As preferências ficam em `HKCU\Software\NetMonitor`.
 
 **Requisitos:** Windows 11 ou 10, .NET Framework 4.8 (já vem no Windows).
 
@@ -142,7 +143,7 @@ Todas as telas são geradas por `scripts\build_rendertest.ps1 -Gallery`.
 .\build.ps1
 ```
 
-Gera `bin/` e os pacotes em `release/v1.0.0/` (instalador, portátil e pacote completo, cada zip com este README).
+Gera `bin/` e os pacotes em `release/v1.0.1/` (instalador, portátil e pacote completo, cada zip com este README).
 
 ---
 
