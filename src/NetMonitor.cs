@@ -529,6 +529,56 @@ namespace NetMonitor
             }
         }
 
+        [DllImport("user32.dll")] private static extern IntPtr MonitorFromWindow(IntPtr hwnd, uint flags);
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern int GetClassName(IntPtr hWnd, StringBuilder name, int max);
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern bool GetMonitorInfo(IntPtr hMon, ref MONITORINFO mi);
+        [DllImport("shell32.dll")] private static extern int SHQueryUserNotificationState(out int state);
+        [StructLayout(LayoutKind.Sequential)] private struct MONITORINFO { public int cbSize; public RECT rcMonitor, rcWork; public int dwFlags; }
+
+        // O widget acompanha a barra de tarefas: some quando ela some.
+        // 1) barra com "ocultar automaticamente" recolhida; 2) Direct3D exclusivo / modo apresentação;
+        // 3) janela em primeiro plano cobrindo o monitor inteiro do widget (F11, jogos sem borda,
+        //    preview em tela cheia do Premiere/After Effects, vídeos).
+        private bool IsFullscreenAppActive()
+        {
+            try
+            {
+                if (IsTaskbarAutoHidden()) return true;
+
+                int st;
+                if (SHQueryUserNotificationState(out st) == 0 && (st == 3 /* D3D tela cheia */ || st == 4 /* apresentação */)) return true;
+
+                IntPtr fg = GetForegroundWindow();
+                if (fg == IntPtr.Zero || fg == this.Handle || (flyout != null && fg == flyout.Handle)) return false;
+                StringBuilder cls = new StringBuilder(64);
+                GetClassName(fg, cls, 64);
+                string c = cls.ToString();
+                if (c == "Progman" || c == "WorkerW" || c == "Shell_TrayWnd" || c == "Shell_SecondaryTrayWnd") return false;
+
+                IntPtr mon = MonitorFromWindow(fg, 2 /* MONITOR_DEFAULTTONEAREST */);
+                if (mon != MonitorFromWindow(this.Handle, 2)) return false;
+                MONITORINFO mi = new MONITORINFO(); mi.cbSize = Marshal.SizeOf(typeof(MONITORINFO));
+                RECT r;
+                if (!GetMonitorInfo(mon, ref mi) || !GetWindowRect(fg, out r)) return false;
+                return r.Left <= mi.rcMonitor.Left && r.Top <= mi.rcMonitor.Top && r.Right >= mi.rcMonitor.Right && r.Bottom >= mi.rcMonitor.Bottom;
+            }
+            catch { return false; }
+        }
+
+        // Barra recolhida: mais da metade dela fora da área do monitor (o Windows deixa só ~2 px à mostra)
+        private static bool IsTaskbarAutoHidden()
+        {
+            IntPtr tray = FindWindow("Shell_TrayWnd", null);
+            RECT r;
+            if (tray == IntPtr.Zero || !GetWindowRect(tray, out r)) return false;
+            MONITORINFO mi = new MONITORINFO(); mi.cbSize = Marshal.SizeOf(typeof(MONITORINFO));
+            if (!GetMonitorInfo(MonitorFromWindow(tray, 2), ref mi)) return false;
+            int h = r.Bottom - r.Top, w = r.Right - r.Left;
+            int visH = Math.Min(r.Bottom, mi.rcMonitor.Bottom) - Math.Max(r.Top, mi.rcMonitor.Top);
+            int visW = Math.Min(r.Right, mi.rcMonitor.Right) - Math.Max(r.Left, mi.rcMonitor.Left);
+            return h > 0 && w > 0 && (visH * 2 < h || visW * 2 < w);
+        }
+
         private static bool IsScreensaverName(string name)
         {
             if (string.IsNullOrEmpty(name)) return false;
@@ -896,12 +946,12 @@ namespace NetMonitor
             int ssTick = 0;
             updateTimer.Tick += (s, e) =>
             {
-                if (S.HideOnScreensaver)
+                // a varredura de protetor de tela é cara: roda a cada ~0,9 s, não a cada tick de 300 ms
+                if (S.HideOnScreensaver && ssTick++ % 3 == 0) ssCached = IsAnyScreensaverActive();
+                // app/jogo em tela cheia no monitor do widget (F11, jogos): some para não ficar por cima
+                bool fullscreen = IsFullscreenAppActive();
                 {
-                    // a varredura de protetor de tela é cara: roda a cada ~0,9 s, não a cada tick de 300 ms
-                    if (ssTick++ % 3 == 0) ssCached = IsAnyScreensaverActive();
-                    bool ss = ssCached;
-                    if (ss || isSessionLocked)
+                    if ((S.HideOnScreensaver && (ssCached || isSessionLocked)) || fullscreen)
                     {
                         if (!isScreensaverRunning || this.Visible)
                         {

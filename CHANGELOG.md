@@ -4,6 +4,14 @@ Versionamento semântico (`MAJOR.MINOR.PATCH`). Cada versão tem sua pasta em `r
 
 ---
 
+## [1.0.1] — 2026-10-25
+
+### Corrigido
+- O widget agora acompanha a barra de tarefas: some quando ela some e volta junto. Antes ficava por cima de tudo em tela cheia. Cobre navegador com F11, jogos (exclusivos ou em janela sem borda), vídeos, preview em tela cheia do Premiere/After Effects, apresentações e a barra com "ocultar automaticamente" recolhida. Vale só para o monitor do widget.
+- O assunto do e-mail de feedback (aba Sobre) usa a versão atual em vez de "v1.0.0" fixo.
+
+---
+
 ## [1.0.0] — 2026-10-25
 
 Primeira versão oficial: o protótipo em HTML (Kimi) e a versão que só abria esse HTML no Edge (Gemini) foram substituídos por um app 100% nativo. Os fontes da fase anterior estão em `_backups/2026-10-24_pre-wpf/`.
