@@ -78,6 +78,13 @@ Copy-Item -Path $netMonitorExe -Destination (Join-Path $portableDir "NetMonitor.
 if (Test-Path $readmeFile) {
     Copy-Item -Path $readmeFile -Destination (Join-Path $portableDir "README.md") -Force
 }
+# imagens que o README referencia (telas, ícone) e a licença, nos mesmos caminhos relativos
+$docAssets = @("src\res\icone_128.png", "LICENSE") + (Get-ChildItem (Join-Path $projectRoot "docs\screenshots") -Filter *.png | ForEach-Object { "docs\screenshots\" + $_.Name })
+foreach ($a in $docAssets) {
+    $dst = Join-Path $portableDir $a
+    New-Item -ItemType Directory -Path (Split-Path $dst -Parent) -Force | Out-Null
+    Copy-Item -Path (Join-Path $projectRoot $a) -Destination $dst -Force
+}
 
 $readmeContent = @"
 ==============================================================================
@@ -104,7 +111,13 @@ This is the official portable version of NetMonitor.
 
 $portableZip = Join-Path $releaseDir "NetMonitor-Portable-v$version.zip"
 if (Test-Path $portableZip) { Remove-Item $portableZip -Force }
-Compress-Archive -Path "$portableDir\*" -DestinationPath $portableZip -Force
+# ZipFile em vez de Compress-Archive: o do PowerShell 5.1 grava caminhos com "\" (pastas quebram fora do Windows)
+Add-Type -AssemblyName System.IO.Compression, System.IO.Compression.FileSystem
+$pz = [System.IO.Compression.ZipFile]::Open($portableZip, [System.IO.Compression.ZipArchiveMode]::Create)
+Get-ChildItem -Path $portableDir -Recurse -File | ForEach-Object {
+    [System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile($pz, $_.FullName, $_.FullName.Substring($portableDir.Length).TrimStart('\').Replace('\', '/')) | Out-Null
+}
+$pz.Dispose()
 
 # 7. Pacote completo (instalador + portátil + README)
 Write-Host "5. Criando pacote completo (NetMonitor-v$version.zip)..." -ForegroundColor Cyan
@@ -113,12 +126,11 @@ if (Test-Path $combinedZip) { Remove-Item $combinedZip -Force }
 [System.Reflection.Assembly]::LoadWithPartialName("System.IO.Compression.FileSystem") | Out-Null
 $zip = [System.IO.Compression.ZipFile]::Open($combinedZip, [System.IO.Compression.ZipArchiveMode]::Create)
 [System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile($zip, $releaseSetup, "NetMonitorSetup.exe") | Out-Null
-if (Test-Path $readmeFile) {
-    [System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile($zip, $readmeFile, "README.md") | Out-Null
-}
-Get-ChildItem -Path $portableDir -Recurse | ForEach-Object {
-    if (-not $_.PSIsContainer) {
-        $rel = "NetMonitor Portable\" + $_.FullName.Substring($portableDir.Length).TrimStart('\')
+Get-ChildItem -Path $portableDir -Recurse -File | ForEach-Object {
+    $rel = $_.FullName.Substring($portableDir.Length).TrimStart('\').Replace('\', '/')
+    [System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile($zip, $_.FullName, "NetMonitor Portable/" + $rel) | Out-Null
+    # README da raiz do pacote com as mesmas imagens ao lado
+    if ($rel -ne "NetMonitor.exe" -and $rel -ne "LEIA-ME.txt") {
         [System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile($zip, $_.FullName, $rel) | Out-Null
     }
 }
