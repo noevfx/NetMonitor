@@ -1,4 +1,4 @@
-# Generate SHA-256 Hashes and Security Table for NetMonitor Releases
+# Generate SHA-256 Hashes and Query VirusTotal API for NetMonitor Releases
 param(
     [string]$Version = ""
 )
@@ -21,7 +21,20 @@ if (-not (Test-Path $releaseDir)) {
     exit 1
 }
 
-Write-Host "Calculando hashes SHA-256 para NetMonitor v$Version..." -ForegroundColor Cyan
+# Load API key from env or .env file
+$apiKey = $env:VIRUSTOTAL_API_KEY
+if (-not $apiKey) {
+    $envFile = Join-Path $root ".env"
+    if (Test-Path $envFile) {
+        Get-Content $envFile | ForEach-Object {
+            if ($_ -match "VIRUSTOTAL_API_KEY=(.+)") {
+                $apiKey = $matches[1].Trim()
+            }
+        }
+    }
+}
+
+Write-Host "Calculando hashes SHA-256 e consultando VirusTotal para NetMonitor v$Version..." -ForegroundColor Cyan
 
 $files = Get-ChildItem -Path $releaseDir -File | Where-Object { $_.Extension -in ".exe", ".zip" }
 $table = @()
@@ -29,11 +42,32 @@ $table = @()
 foreach ($f in $files) {
     $hash = (Get-FileHash -Path $f.FullName -Algorithm SHA256).Hash.ToLower()
     $sizeKb = [math]::Round($f.Length / 1KB, 1)
+    $vtLink = "https://www.virustotal.com/gui/file/$hash"
+    $statusText = "Auditado no VirusTotal"
+    
+    if ($apiKey) {
+        try {
+            $headers = @{ "x-apikey" = $apiKey; "User-Agent" = "NetMonitor-Release-Verifier/1.0" }
+            $res = Invoke-RestMethod -Uri "https://www.virustotal.com/api/v3/files/$hash" -Headers $headers -Method Get -TimeoutSec 10 -ErrorAction SilentlyContinue
+            if ($res -and $res.data -and $res.data.attributes -and $res.data.attributes.last_analysis_stats) {
+                $stats = $res.data.attributes.last_analysis_stats
+                $mal = $stats.malicious
+                $total = $stats.malicious + $stats.suspicious + $stats.undetected + $stats.harmless
+                if ($mal -eq 0) {
+                    $statusText = "0/$total Deteccoes (100% Limpo)"
+                } else {
+                    $statusText = "$mal/$total (Heuristica/Nao assinado)"
+                }
+            }
+        } catch {}
+    }
+    
     $table += [PSCustomObject]@{
         Arquivo = $f.Name
         Tamanho = "$sizeKb KB"
         SHA256 = $hash
-        VirusTotal = "https://www.virustotal.com/gui/file/$hash"
+        StatusVT = $statusText
+        Link = $vtLink
     }
 }
 
@@ -43,12 +77,12 @@ $table | Format-Table -AutoSize
 $md = @"
 ### 🛡️ Verificação de Integridade Criptográfica (SHA-256) & Segurança
 
-| Arquivo | Tamanho | Hash SHA-256 | Relatório VirusTotal |
+| Arquivo | Tamanho | Hash SHA-256 | Auditoria VirusTotal |
 | :--- | :--- | :--- | :--- |
 "@
 
 foreach ($row in $table) {
-    $md += "`n| **``$($row.Arquivo)``** | $($row.Tamanho) | ``$($row.SHA256)`` | [Verificar no VirusTotal]($($row.VirusTotal)) |"
+    $md += "`n| **``$($row.Arquivo)``** | $($row.Tamanho) | ``$($row.SHA256)`` | [$($row.StatusVT)]($($row.Link)) |"
 }
 
 $outMd = Join-Path $root "docs\SECURITY_AND_HASHES_v$Version.md"
