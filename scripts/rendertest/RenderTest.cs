@@ -83,11 +83,97 @@ static class P
         using (FileStream fs = File.Create(Path.Combine(outDir, name))) enc.Save(fs);
     }
 
+    // Galeria da documentação: todas as telas em Monocromático e Lima & Ciano, claro e escuro,
+    // mais a barra de tarefas composta (widget + flyout aberto) nos dois temas.
+    static void Gallery()
+    {
+        string[][] combos = new string[][] { new string[] { "pure_mono", "mono" }, new string[] { "lima_ciano", "lima" } };
+        foreach (string[] c in combos)
+        foreach (bool dark in new bool[] { true, false })
+        {
+            string theme = dark ? "dark" : "light", tag = c[1] + "_" + theme;
+            foreach (string page in new string[] { "cores", "layout", "fonte", "setas", "apps", "geral", "sobre" })
+            {
+                FakeHost h = new FakeHost();
+                h.S.ThemeMode = theme; h.S.ColorPreset = c[0];
+                SaveVisual((FrameworkElement)new SettingsWindow(h, page).Content, 1560, 980, tag + "_win_" + page + ".png");
+            }
+            FakeHost hf = new FakeHost(); hf.S.ColorPreset = c[0];
+            FlyoutHit hit;
+            using (D.Bitmap fl = FlyoutRenderer.Render(hf.S, dark, hf.TopApps(), 11.7e6, 156.9e6, 144f, 1, 0, out hit))
+            using (D.Bitmap wd = WidgetRenderer.Render(hf.S, dark, "11,7", "Mbps", "156,9", "Mbps", 144f))
+            {
+                SaveBmp(fl, tag + "_flyout.png", dark ? D.Color.FromArgb(10, 13, 20) : D.Color.FromArgb(235, 240, 250));
+                Taskbar(wd, fl, dark, tag + "_taskbar.png", false);
+                Taskbar(wd, fl, dark, tag + "_taskbar_transparente.png", true);
+            }
+        }
+        foreach (string lg in new string[] { "pt", "en" })
+            SaveVisual((FrameworkElement)new NetMonitor.InstallerApp(null, lg).Content, 560, 520, "installer_" + lg + ".png");
+        Console.WriteLine("ok: galeria gerada");
+    }
+
+    // Barra do Windows 11 a 150% (48 px -> 72 px): área de trabalho, flyout acima do widget, bandeja e relógio
+    // semFundo: sem a área de trabalho (PNG com transparência, só barra + flyout)
+    static void Taskbar(D.Bitmap widget, D.Bitmap flyout, bool dark, string name, bool semFundo)
+    {
+        const int W = 1400, H = 980, TB = 72;
+        using (D.Bitmap img = new D.Bitmap(W, H))
+        using (D.Graphics g = D.Graphics.FromImage(img))
+        {
+            g.SmoothingMode = D.Drawing2D.SmoothingMode.AntiAlias;
+            g.TextRenderingHint = D.Text.TextRenderingHint.AntiAliasGridFit;
+            D.Color d1 = dark ? D.Color.FromArgb(18, 28, 48) : D.Color.FromArgb(196, 214, 238);
+            D.Color d2 = dark ? D.Color.FromArgb(40, 22, 58) : D.Color.FromArgb(232, 222, 240);
+            if (!semFundo)
+                using (D.Drawing2D.LinearGradientBrush bg = new D.Drawing2D.LinearGradientBrush(new D.Rectangle(0, 0, W, H - TB), d1, d2, 35f))
+                    g.FillRectangle(bg, 0, 0, W, H - TB);
+            D.Color bar = dark ? D.Color.FromArgb(28, 28, 28) : D.Color.FromArgb(238, 238, 238);
+            D.Color fg = dark ? D.Color.White : D.Color.FromArgb(26, 26, 26);
+            using (D.SolidBrush b = new D.SolidBrush(bar)) g.FillRectangle(b, 0, H - TB, W, TB);
+            using (D.Pen p = new D.Pen(dark ? D.Color.FromArgb(60, 60, 60) : D.Color.FromArgb(214, 214, 214))) g.DrawLine(p, 0, H - TB, W, H - TB);
+
+            // relógio
+            int x = W - 18;
+            using (D.Font f = new D.Font("Segoe UI Variable Text", 13.5f, D.GraphicsUnit.Point))
+            using (D.SolidBrush b = new D.SolidBrush(fg))
+            using (D.StringFormat sf = new D.StringFormat { Alignment = D.StringAlignment.Far })
+            {
+                g.DrawString("17:55", f, b, x, H - TB + 10, sf);
+                g.DrawString("25/10/2026", f, b, x, H - TB + 36, sf);
+                x -= (int)g.MeasureString("25/10/2026", f).Width + 14;
+            }
+            // ícones da bandeja (Segoe Fluent Icons)
+            D.Font probe = new D.Font("Segoe Fluent Icons", 12f, D.GraphicsUnit.Point);
+            string icoFont = probe.Name == "Segoe Fluent Icons" ? "Segoe Fluent Icons" : "Segoe MDL2 Assets";
+            probe.Dispose();
+            using (D.Font fi = new D.Font(icoFont, 12f, D.GraphicsUnit.Point))
+            using (D.SolidBrush b = new D.SolidBrush(fg))
+            using (D.StringFormat sf = new D.StringFormat { Alignment = D.StringAlignment.Center, LineAlignment = D.StringAlignment.Center })
+            {
+                foreach (string glyph in new string[] { "", "", "", "", "" })
+                {
+                    g.DrawString(glyph, fi, b, x - 18, H - TB / 2, sf);
+                    x -= 44;
+                }
+            }
+            // widget à esquerda da bandeja, centralizado na barra
+            widget.SetResolution(96f, 96f); flyout.SetResolution(96f, 96f);
+            int wx = x - widget.Width + 12, wy = H - TB + (TB - widget.Height) / 2;
+            g.DrawImage(widget, wx, wy);
+            // flyout acima, alinhado à direita do widget como no app
+            int fx = Math.Min(W - flyout.Width - 18, wx + widget.Width - flyout.Width + 60), fy = H - TB - flyout.Height - 12;
+            g.DrawImage(flyout, fx, fy);
+            img.Save(Path.Combine(outDir, name), D.Imaging.ImageFormat.Png);
+        }
+    }
+
     [STAThread]
     static void Main(string[] args)
     {
         outDir = args.Length > 0 ? args[0] : ".";
         Directory.CreateDirectory(outDir);
+        if (args.Length > 1 && args[1] == "gallery") { Gallery(); return; }
 
         // widget: variações
         string[][] v = new string[][] {

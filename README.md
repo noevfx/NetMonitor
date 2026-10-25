@@ -87,13 +87,38 @@ Organizado em seções: **Unidade**, **Escala**, **Flyout** (ativado, abrir ao p
 
 ## Telas
 
+### Na barra de tarefas
+
+| Barra escura | Barra clara |
+| :---: | :---: |
+| ![Monocromático, barra escura](docs/screenshots/mono_dark_taskbar.png) | ![Monocromático, barra clara](docs/screenshots/mono_light_taskbar.png) |
+| ![Lima & Ciano, barra escura](docs/screenshots/lima_dark_taskbar.png) | ![Lima & Ciano, barra clara](docs/screenshots/lima_light_taskbar.png) |
+
+### Configurações (Monocromático)
+
 | Escuro | Claro |
 | :---: | :---: |
-| ![Cores escuro](docs/screenshots/win_dark_cores.png) | ![Cores claro](docs/screenshots/win_light_cores.png) |
-| ![Layout escuro](docs/screenshots/win_dark_layout.png) | ![Layout claro](docs/screenshots/win_light_layout.png) |
-| ![Tipografia escuro](docs/screenshots/win_dark_fonte.png) | ![Tipografia claro](docs/screenshots/win_light_fonte.png) |
-| ![Setas escuro](docs/screenshots/win_dark_setas.png) | ![Setas claro](docs/screenshots/win_light_setas.png) |
-| ![Flyout escuro](docs/screenshots/flyout_dark.png) | ![Flyout claro](docs/screenshots/flyout_light.png) |
+| ![](docs/screenshots/mono_dark_win_cores.png) | ![](docs/screenshots/mono_light_win_cores.png) |
+| ![](docs/screenshots/mono_dark_win_layout.png) | ![](docs/screenshots/mono_light_win_layout.png) |
+| ![](docs/screenshots/mono_dark_win_fonte.png) | ![](docs/screenshots/mono_light_win_fonte.png) |
+| ![](docs/screenshots/mono_dark_win_setas.png) | ![](docs/screenshots/mono_light_win_setas.png) |
+| ![](docs/screenshots/mono_dark_win_apps.png) | ![](docs/screenshots/mono_light_win_apps.png) |
+| ![](docs/screenshots/mono_dark_win_geral.png) | ![](docs/screenshots/mono_light_win_geral.png) |
+| ![](docs/screenshots/mono_dark_win_sobre.png) | ![](docs/screenshots/mono_light_win_sobre.png) |
+
+### Configurações (Lima & Ciano)
+
+| Escuro | Claro |
+| :---: | :---: |
+| ![](docs/screenshots/lima_dark_win_cores.png) | ![](docs/screenshots/lima_light_win_cores.png) |
+| ![](docs/screenshots/lima_dark_win_layout.png) | ![](docs/screenshots/lima_light_win_layout.png) |
+| ![](docs/screenshots/lima_dark_win_fonte.png) | ![](docs/screenshots/lima_light_win_fonte.png) |
+| ![](docs/screenshots/lima_dark_win_setas.png) | ![](docs/screenshots/lima_light_win_setas.png) |
+| ![](docs/screenshots/lima_dark_win_apps.png) | ![](docs/screenshots/lima_light_win_apps.png) |
+| ![](docs/screenshots/lima_dark_win_geral.png) | ![](docs/screenshots/lima_light_win_geral.png) |
+| ![](docs/screenshots/lima_dark_win_sobre.png) | ![](docs/screenshots/lima_light_win_sobre.png) |
+
+Todas as telas são geradas por `scripts\build_rendertest.ps1 -Gallery`.
 
 <div align="center">
 <img src="docs/screenshots/installer_pt.png" alt="Instalador" width="520" />

@@ -12,3 +12,5 @@ $res = @("icone_128.png","icone_256.png","pix_qrcode.png","wordmark_branca.png")
   $res /out:"$out\RenderTest.exe" "$PSScriptRoot\rendertest\RenderTest.cs" "$src\Settings.cs" "$src\Version.g.cs" "$src\Data.cs" "$src\WidgetRenderer.cs" "$src\FlyoutRenderer.cs" "$src\Icons.cs" "$src\WpfKit.cs" "$src\SettingsWindow.cs" "$src\InstallerApp.cs"
 if ($LASTEXITCODE -ne 0) { throw "csc falhou" }
 & "$out\RenderTest.exe" (Join-Path $root "bin\shots")
+# -Gallery: telas da documentação (Monocromático e Lima & Ciano, claro/escuro, barra composta) em docs\screenshots
+if ($args -contains "-Gallery") { & "$out\RenderTest.exe" (Join-Path $root "docs\screenshots") gallery }
