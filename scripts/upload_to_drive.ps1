@@ -45,8 +45,9 @@ if (-not (Test-Path $driveRelease)) { New-Item -ItemType Directory -Path $driveR
 Copy-Item -Path "$projectRoot\release\*" -Destination $driveRelease -Recurse -Force
 
 # Copiar também para a raiz do Drive para acesso rapido
-Copy-Item -Path "$projectRoot\release\NetMonitorSetup.exe" -Destination $target -Force
-Copy-Item -Path "$projectRoot\release\NetMonitor-v*.zip" -Destination $target -Force
+$version = (Get-Content "$projectRoot\version.txt" -Raw).Trim()
+Copy-Item -Path "$projectRoot\release\v$version\NetMonitorSetup.exe" -Destination $target -Force
+Copy-Item -Path "$projectRoot\release\v$version\NetMonitor-v*.zip" -Destination $target -Force
 
 # 3. Sincronizar Documentacao e Handoff
 Write-Host "2. Sincronizando Documentacao e Handoff..." -ForegroundColor Yellow

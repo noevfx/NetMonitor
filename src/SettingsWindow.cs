@@ -480,11 +480,15 @@ namespace NetMonitor.Ui
 
 
         // ------------------------------------------------------------ blocos reutilizáveis
-        Border CardBox(string title, string desc, UIElement body)
+        Border CardBox(string title, string desc, UIElement body) { return CardBox(title, desc, null, body); }
+
+        // right: controle opcional à direita do título (ex.: um switch)
+        Border CardBox(string title, string desc, UIElement right, UIElement body)
         {
             TextBlock h = K.T(title.ToUpper(), 12, FontWeights.Bold, "text");
             TextBlock p = K.Wrap(K.T(desc, 11, "sub"));
             UIElement head = K.V(2, h, p);
+            if (right != null) head = K.LR(head, right);
             StackPanel sp = K.V(16, head, body);
             return new Border { Background = K.B("card"), CornerRadius = new CornerRadius(12), Padding = new Thickness(20), Child = sp, Margin = new Thickness(0, 0, 0, 20) };
         }
@@ -531,6 +535,7 @@ namespace NetMonitor.Ui
                 top.Children.Add(chk);
                 TextBlock nm = K.Wrap(K.T(p.Name, 11, FontWeights.Bold, "text"));
                 TextBlock sb = K.Wrap(K.T(p.Sub, 9, "sub"));
+                sb.MinHeight = K.S(9) * 2.7;   // reserva 2 linhas: a linha TX/RX fica na mesma altura em todos os cartões
                 TextBlock tx = K.T("▲ TX", 10, FontWeights.Bold, "text");
                 TextBlock rx = K.T("▼ RX", 10, FontWeights.Bold, "text");
                 StackPanel bot = K.H(6, tx, K.T("·", 10, "dim"), rx);
@@ -569,7 +574,10 @@ namespace NetMonitor.Ui
                 ((Ico)sw2.Child).Tint(new SolidColorBrush(Pal.Luminance(S.DownHex(dk)) > 0.4 ? Colors.Black : Colors.White));
                 hx1.Text = S.UpHex(dk); hx2.Text = S.DownHex(dk);
             });
-            Border metrics = CardBox("Cores Personalizadas", "Escolha um tom próprio para upload e download.", K.Cols(2, 12, m1, m2));
+            Switch swInv = new Switch(); swInv.Changed = delegate(bool v) { S.InvertColors = v; Changed(); };
+            upd.Add(delegate { swInv.Value = S.InvertColors; });
+            UIElement invert = K.H(10, K.T("Inverter cores", 12, FontWeights.SemiBold, "text"), swInv);
+            Border metrics = CardBox("Cores Personalizadas", "Escolha um tom próprio para upload e download.", invert, K.Cols(2, 12, m1, m2));
 
             // tema
             Seg seg = new Seg(12, 12, true, new string[] { "Seguir Windows (Padrão)", "Escuro", "Claro" }, new string[] { "tema-sistema", "tema-escuro", "tema-claro" });
@@ -608,7 +616,8 @@ namespace NetMonitor.Ui
                 if (dlg.ShowDialog(ow) == System.Windows.Forms.DialogResult.OK)
                 {
                     string h = string.Format("#{0:X2}{1:X2}{2:X2}", dlg.Color.R, dlg.Color.G, dlg.Color.B);
-                    if (up) S.UpCustom = h; else S.DownCustom = h;
+                    // com as cores invertidas, a cor mostrada em "Upload" vem do campo de download
+                    if (up != S.InvertColors) S.UpCustom = h; else S.DownCustom = h;
                     Changed();
                 }
             }

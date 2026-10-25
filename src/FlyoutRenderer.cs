@@ -409,8 +409,9 @@ namespace NetMonitor
                 float fy = footTop + (footH - fFoot.GetHeight(g)) / 2f + 2 * sc;
                 string cfg = "Configurações";
                 float cw = g.MeasureString(cfg, fFoot, PointF.Empty, tf).Width;
-                SvgPath.DrawIcon(g, "nav-geral", pad, fy - 1 * sc, 15 * sc, cSub);
-                using (SolidBrush b = new SolidBrush(cSub)) g.DrawString(cfg, fFoot, b, pad + 20 * sc, fy, tf);
+                Color cLink = WidgetRenderer.Hex(Pal.FitContrast(Pal.Brand, t.FlyoutBg, 4.5, dark), 255);
+                SvgPath.DrawIcon(g, "nav-geral", pad, fy - 1 * sc, 15 * sc, cLink);
+                using (SolidBrush b = new SolidBrush(cLink)) g.DrawString(cfg, fFoot, b, pad + 20 * sc, fy, tf);
                 hit.SettingsLink = Rectangle.Round(new RectangleF(pad - 6 * sc + m, fy - 6 * sc + m, cw + 32 * sc, 26 * sc));
 
                 string tu = SpeedFmt.Compact(s, totUpBps, true), td = SpeedFmt.Compact(s, totDnBps, false);
