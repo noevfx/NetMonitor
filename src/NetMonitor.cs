@@ -238,8 +238,6 @@ namespace NetMonitor
         private const int DWMWCP_ROUND = 2;
 
         private const string REG_KEY_APP = @"Software\NetMonitor";
-        private const string REG_KEY_RUN = @"Software\Microsoft\Windows\CurrentVersion\Run";
-        private const string APP_NAME = "NetMonitor";
 
         private const int WS_EX_LAYERED = 0x00080000;
         private const int WM_DPICHANGED = 0x02E0;
@@ -400,6 +398,7 @@ namespace NetMonitor
                 lastSystemDark = IsWindowsDarkTheme();
                 RenderWidget();
                 if (flyout != null && flyout.Visible) UpdateFlyout();
+                RethemeMenu();
             }
             catch { }
         }
@@ -497,24 +496,6 @@ namespace NetMonitor
             return un + uu + dn + du;
         }
 
-        // ------------------------------------------------------------------ utilidades
-        public static string ColorToHex(Color c)
-        {
-            return string.Format("#{0:X2}{1:X2}{2:X2}", c.R, c.G, c.B);
-        }
-
-        public static Color HexToColor(string hex, Color defaultColor)
-        {
-            if (string.IsNullOrEmpty(hex)) return defaultColor;
-            try
-            {
-                return ColorTranslator.FromHtml(hex);
-            }
-            catch
-            {
-                return defaultColor;
-            }
-        }
 
         public static bool IsWindowsDarkTheme()
         {
@@ -1555,6 +1536,30 @@ namespace NetMonitor
             };
             contextMenu.Items.Add(mnuExit);
             StyleItems(contextMenu.Items, menuFont, isDark);
+        }
+
+        // Troca as cores do menu (inclusive aberto) quando o tema do Windows muda
+        private void RethemeMenu()
+        {
+            if (contextMenu == null || contextMenu.IsDisposed) return;
+            bool dark = EffectiveDark;
+            Windows11MenuRenderer r = new Windows11MenuRenderer(dark);
+            contextMenu.Renderer = r;
+            Windows11MenuRenderer.StyleDropDown(contextMenu, dark);
+            RethemeItems(contextMenu.Items, r, dark);
+            contextMenu.Invalidate(true);
+        }
+
+        private static void RethemeItems(ToolStripItemCollection items, ToolStripRenderer r, bool dark)
+        {
+            foreach (ToolStripItem it in items)
+            {
+                ToolStripMenuItem mi = it as ToolStripMenuItem;
+                if (mi == null || !mi.HasDropDownItems) continue;
+                mi.DropDown.Renderer = r;
+                if (mi.DropDown.Visible) { Windows11MenuRenderer.StyleDropDown(mi.DropDown, dark); mi.DropDown.Invalidate(true); }
+                RethemeItems(mi.DropDownItems, r, dark);
+            }
         }
 
         // Altura confortável, mesma fonte e mesmo visual (cantos/borda) em todos os submenus

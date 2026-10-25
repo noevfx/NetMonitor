@@ -1,6 +1,6 @@
 # ==============================================================================
 # NetMonitor - Script de Build Automatizado
-# Gera os pacotes organizados na pasta release\:
+# Gera os pacotes organizados na pasta release\vX.Y.Z\:
 #   1. NetMonitorSetup.exe (Instalador nativo WPF)
 #   2. NetMonitor Portable\ (Pasta da versão portátil com README)
 #   3. NetMonitor-Portable-vX.Y.Z.zip (Arquivo portátil avulso com README)
@@ -18,7 +18,7 @@ $wpf = "C:\Windows\Microsoft.NET\Framework64\v4.0.30319\WPF"
 $srcDir = Join-Path $projectRoot "src"
 $resDir = Join-Path $srcDir "res"
 $binDir = Join-Path $projectRoot "bin"
-$releaseDir = Join-Path $projectRoot "release"
+$releaseDir = Join-Path $projectRoot "release\v$version"   # uma pasta por versão, em ordem crescente
 $readmeFile = Join-Path $projectRoot "README.md"
 $iconPath = Join-Path $srcDir "app.ico"
 $wpfRefs = "System.dll,System.Core.dll,System.Drawing.dll,System.Windows.Forms.dll,PresentationCore.dll,PresentationFramework.dll,WindowsBase.dll,System.Xaml.dll"
@@ -125,7 +125,7 @@ Get-ChildItem -Path $portableDir -Recurse | ForEach-Object {
 $zip.Dispose()
 
 Write-Host "`n========================================================" -ForegroundColor Green
-Write-Host "Build v$version concluído com sucesso em release\!" -ForegroundColor Green
+Write-Host "Build v$version concluído com sucesso em release\v$version\!" -ForegroundColor Green
 Write-Host "  * Pacote completo: $combinedZip" -ForegroundColor Yellow
 Write-Host "  * Instalador:      $releaseSetup" -ForegroundColor Yellow
 Write-Host "  * Portátil:        $portableZip" -ForegroundColor Yellow

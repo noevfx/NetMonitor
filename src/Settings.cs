@@ -18,9 +18,12 @@ namespace NetMonitor
     public class ColorPreset
     {
         public string Key, Name, Sub, DarkUp, DarkDown;
-        public ColorPreset(string key, string name, string sub, string du, string dd)
+        public bool Vivid;   // vibrante: contraste mínimo 4,5:1 para preservar a saturação (ex.: azul da marca)
+        public string LightUp, LightDown;   // opcional: tons do claro definidos à mão (sem cálculo automático)
+        public ColorPreset(string key, string name, string sub, string du, string dd) : this(key, name, sub, du, dd, false) { }
+        public ColorPreset(string key, string name, string sub, string du, string dd, bool vivid)
         {
-            Key = key; Name = name; Sub = sub; DarkUp = du; DarkDown = dd;
+            Key = key; Name = name; Sub = sub; DarkUp = du; DarkDown = dd; Vivid = vivid;
         }
     }
 
@@ -50,8 +53,12 @@ namespace NetMonitor
         {
             new ColorPreset("pure_mono", "Monocromático", "Branco no escuro, preto no claro", "#FFFFFF", "#FFFFFF"),
             new ColorPreset("accent", "Cor de Destaque", "Segue o destaque do Windows", "#0078D4", "#0078D4"),
+            new ColorPreset("lima_ciano", "Lima & Ciano", "Elétrico, máximo destaque", "#E2FF00", "#32C8FA") { LightUp = "#7AC600", LightDown = "#0AA6E6" },
             new ColorPreset("ambar_ceu", "Âmbar & Céu", "Seguro para daltonismo", "#FFB347", "#5CC8FF"),
-            new ColorPreset("aurora", "Aurora", "Lavanda & menta", "#C4A1FF", "#4FE3C1")
+            new ColorPreset("aurora", "Aurora", "Lavanda & menta", "#C4A1FF", "#4FE3C1"),
+            new ColorPreset("rosa_esmeralda", "Rosa & Esmeralda", "Complementares vivos", "#FF6FAE", "#34E08A"),
+            new ColorPreset("fogo_gelo", "Fogo & Gelo", "Quente sobe, frio desce", "#FF5E57", "#8FD8FF"),
+            new ColorPreset("azul_magenta", "Azul & Magenta", "Azul da marca + neon", "#0066FF", "#FF2E9A", true)
         };
 
         const string DarkBar = "#202020", LightBar = "#F3F3F3";
@@ -61,6 +68,7 @@ namespace NetMonitor
         {
             ColorPreset p = Find(key);
             if (p.Key == "pure_mono") return dark ? "#FFFFFF" : "#000000";
+            if (!dark && p.LightUp != null) return up ? p.LightUp : p.LightDown;
             string baseHex = up ? p.DarkUp : p.DarkDown;
             if (p.Key == "accent")
             {
@@ -68,7 +76,8 @@ namespace NetMonitor
                 string acc = WindowsAccent();
                 baseHex = up ? acc : Tint(acc, 0.45);
             }
-            return dark ? FitContrast(baseHex, DarkBar, 6.0, true) : FitContrast(baseHex, LightBar, 5.0, false);
+            double min = p.Vivid ? 4.5 : (dark ? 6.0 : 5.0);
+            return dark ? FitContrast(baseHex, DarkBar, min, true) : FitContrast(baseHex, LightBar, min, false);
         }
 
         public static string WindowsAccent()
@@ -229,6 +238,7 @@ namespace NetMonitor
         public string DownCustom = null;
 
         // Flyout
+        public bool InvertColors = false;           // troca a cor de upload com a de download
         public bool FlyoutEnabled = true;           // desligado: o flyout não abre nem existe em memória
         public bool FlyoutPinned = false;
         public string FlyoutMode = "separated";      // separated | combined
@@ -279,17 +289,17 @@ namespace NetMonitor
             return systemDark;
         }
 
-        public string UpHex(bool dark)
+        // Cor sem a inversão (o que o preset ou o usuário definiu para cada sentido)
+        public string RawHex(bool up, bool dark)
         {
-            if (!string.IsNullOrEmpty(UpCustom)) return UpCustom;
-            return Pal.Resolve(ColorPreset, true, dark);
+            string custom = up ? UpCustom : DownCustom;
+            if (!string.IsNullOrEmpty(custom)) return custom;
+            return Pal.Resolve(ColorPreset, up, dark);
         }
 
-        public string DownHex(bool dark)
-        {
-            if (!string.IsNullOrEmpty(DownCustom)) return DownCustom;
-            return Pal.Resolve(ColorPreset, false, dark);
-        }
+        // InvertColors troca as cores de upload e download entre si
+        public string UpHex(bool dark) { return RawHex(!InvertColors, dark); }
+        public string DownHex(bool dark) { return RawHex(InvertColors, dark); }
 
         public string BorderHex(bool dark)
         {
@@ -393,6 +403,7 @@ namespace NetMonitor
                         s.ArrowScale = Dbl(k, "ArrowScale", s.ArrowScale);
                         s.ShowUnit = Bool(k, "ShowUnit", s.ShowUnit);
                         s.FlyoutEnabled = Bool(k, "FlyoutEnabled", s.FlyoutEnabled);
+                        s.InvertColors = Bool(k, "InvertColors", s.InvertColors);
                         s.ColorPreset = Str(k, "ColorPreset", s.ColorPreset);
                         string uc = Str(k, "UpCustom", "");
                         string dc = Str(k, "DownCustom", "");
@@ -442,6 +453,7 @@ namespace NetMonitor
                     k.SetValue("ArrowScale", ArrowScale.ToString(CultureInfo.InvariantCulture));
                     k.SetValue("ShowUnit", ShowUnit ? 1 : 0);
                     k.SetValue("FlyoutEnabled", FlyoutEnabled ? 1 : 0);
+                    k.SetValue("InvertColors", InvertColors ? 1 : 0);
                     k.SetValue("ColorPreset", ColorPreset);
                     k.SetValue("UpCustom", UpCustom ?? "");
                     k.SetValue("DownCustom", DownCustom ?? "");

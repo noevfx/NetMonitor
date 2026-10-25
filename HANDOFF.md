@@ -10,7 +10,7 @@
 - **Versão Atual**: `1.0.0` (Lançamento Oficial)
 - **Plataforma**: Windows 11 e Windows 10 (x64 / AnyCPU)
 - **Tecnologia**: C# puro (.NET Framework 4.8 / `csc.exe` nativo) + WPF nativo + GDI+ acelerado.
-- **Filosofia**: Zero dependências pesadas, sem WebView2/Node/Electron. Arquitetura de processos duplos para estabilidade e isolamento: Widget em background (~0.1% CPU, ~55 MB RAM) e Janela de Configurações WPF sob demanda (~135-150 MB RAM, desalocada imediatamente ao fechar). Consumo combinado no pico com ambas as janelas abertas: ~190-200 MB RAM. Design alinhado ao **Windows 11 Fluent 2**.
+- **Filosofia**: Zero dependências, sem WebView2/Node/Electron. Dois processos: widget (Windows Forms + GDI+, nunca carrega WPF, ~12–18 MB RAM) e janela de Configurações WPF sob demanda (`NetMonitor.exe --settings <hwnd do widget> <página>`, ~135 MB, liberados ao fechar), ligados por `WM_COPYDATA`. Design alinhado ao **Windows 11 Fluent 2**; referência visual em `docs/design/paletas_fluent2_showcase.html`.
 - **Autor / Empresa**: Eduardo Noé ([Noé VFX](https://noevfx.com)) — `labs@noevfx.com`
 - **Chave Pix (Doação na aba Sobre)**: `a772dce2-7cf6-45db-a699-2102e189b30b` (Nubank PJ)
 
@@ -48,7 +48,8 @@ Quando for iniciada uma nova versão do NetMonitor, o fluxo obrigatório a ser s
    - Os binários compilados são organizados em pastas crescentes:
      - Local: `NetMonitor\release\v1.0.0\`, `NetMonitor\release\v1.0.1\`, etc.
      - Google Drive: `G:\Meu Drive\NetMonitor\release\v1.0.0\`, `G:\Meu Drive\NetMonitor\release\v1.0.1\`.
-   - Na raiz de `release\`, os links ou cópias da versão mais recente são mantidos para conveniência.
+   - O `scripts\build.ps1` já grava em `release\v<version.txt>\`; versões anteriores nunca são apagadas nem sobrescritas.
+   - No Drive, a raiz de `G:\Meu Drive\NetMonitor` recebe também uma cópia do instalador e do pacote completo da versão mais recente.
 3. **Bump de Versão (SemVer):**
    - O incremento ocorre exclusivamente em dois arquivos sincronizados:
      - `NetMonitor\version.txt` (ex: `1.0.1`)
@@ -82,24 +83,23 @@ D:\_Antigravity\NetMonitor\
 │   │   └── Instagram - Carrossel\ # Peças promocionais de marketing
 │   └── screenshots\             # Screenshots das telas do app em Dark e Light Mode
 │
-├── release\                     # Pacotes de distribuição oficiais
-│   ├── NetMonitor Portable\     # Pasta da versão portátil autossuficiente
-│   │   ├── LEIA-ME.txt
-│   │   └── NetMonitor.exe
-│   ├── NetMonitor-Portable-v1.0.0.zip
-│   ├── NetMonitor-v1.0.0.zip
-│   └── NetMonitorSetup.exe
+├── release\                     # Pacotes oficiais, uma pasta por versão (crescente)
+│   └── v1.0.0\
+│       ├── NetMonitor Portable\ # LEIA-ME.txt, README.md, NetMonitor.exe
+│       ├── NetMonitor-Portable-v1.0.0.zip
+│       ├── NetMonitor-v1.0.0.zip
+│       └── NetMonitorSetup.exe
 │
 ├── scripts\                     # Scripts de automação e compilação
 │   ├── build.ps1                # Script mestre de compilação C#
 │   ├── build_dev.ps1            # Compilação rápida para desenvolvimento
-│   ├── build_rendertest.ps1     # Executa harness de testes visuais e screenshots
-│   ├── backup_version.ps1       # Automação de backup incremental de versão
-│   ├── install.ps1              # Instalação rápida local
-│   ├── uninstall.ps1            # Desinstalação limpa
-│   ├── upload_to_drive.ps1      # Sincronização com o Google Drive
-│   ├── rendertest\              # Código do harness de renderização visual
-│   └── test\                    # Scripts auxiliares de teste
+│   ├── build_rendertest.ps1     # Harness: PNGs em bin\shots + testes de ligação dos controles
+│   ├── e2e.ps1                  # Teste real: hit-test, menu, encaixe, dois processos, RAM
+│   ├── shot.ps1                 # Captura de janela (PrintWindow)
+│   ├── backup_version.ps1       # Backup da versão estável em _backups\vX.Y.Z
+│   ├── install.ps1 / uninstall.ps1
+│   ├── upload_to_drive.ps1      # Espelho no Google Drive
+│   └── rendertest\              # Código do harness (RenderTest.cs)
 │
 ├── src\                         # Código-Fonte C# Modularizado (.NET 4.8)
 │   ├── NetMonitor.cs            # Ponto de entrada do widget, tray, loop de rede e eventos
@@ -112,7 +112,7 @@ D:\_Antigravity\NetMonitor\
 │   ├── WpfKit.cs                # Componentes e helpers XAML/WPF personalizados
 │   ├── SettingsWindow.cs        # Janela completa de Configurações em WPF nativo
 │   ├── SettingsProcess.cs       # Isolamento de processo da janela de configurações
-│   ├── Ipc.cs                   # Comunicação entre processos via Named Pipes
+│   ├── Ipc.cs                   # Comunicação entre processos via WM_COPYDATA
 │   ├── InstallerApp.cs          # Assistente de instalação nativo WPF
 │   ├── Uninstaller.cs           # Desinstalador nativo limpo
 │   ├── app.ico                  # Ícone executável multi-resolução
@@ -131,17 +131,17 @@ A refatoração modularizou o código monolítico anterior em componentes coesos
 
 | Arquivo | Responsabilidade |
 | :--- | :--- |
-| `NetMonitor.cs` | Inicialização do app, hook de barra de tarefas, menu de contexto do widget, timers de amostragem de rede, flyout hover/click e ciclo de vida. |
-| `Settings.cs` | Modelos de dados (`AppSettings`), valores padrão, clonagem, persistência no Registro do Windows (`HKCU\Software\NetMonitor`), 4 presets de cores assinados (`pure_mono`, `accent`, `ambar_ceu`, `aurora`), cálculo de contraste e tokens Ace Obsidian para tema claro e escuro. |
-| `Version.g.cs` | Definição estática da versão (`1.0.0`), assembly version e link de release. |
-| `Data.cs` | Coleta de métricas via `NetworkInterface` e inspeção de processos via `GetExtendedTcpTable` (com filtro de conexões locais e normalização). |
-| `WidgetRenderer.cs` | Desenho GDI+ de alto desempenho do widget (linhas de velocidade, setas, fontes tabulares, fundos acrílico/sólido). |
-| `FlyoutRenderer.cs` | Renderização do painel suspenso Top 5 processos com cálculo de hit-test, barra de progresso e animação Bézier. |
-| `Icons.cs` | Desenho procedural em C# dos 6 conjuntos de setas e ícones dos menus. |
-| `WpfKit.cs` | Framework WPF leve: controles de abas, switches Fluent 2, seletores de cor, caixas de diálogo e estilos de janela. |
-| `SettingsWindow.cs` | UI completa da Central de Configurações (7 páginas: Cores, Layout, Tipografia, Setas, Apps, Geral, Sobre). |
-| `SettingsProcess.cs` | Gerenciamento do ciclo de vida da janela de configurações em processo isolado para estabilidade máxima. |
-| `Ipc.cs` | Canal IPC bidirecional rápido via `NamedPipeServerStream` / `NamedPipeClientStream`. |
+| `NetMonitor.cs` | `Main` (com `--settings`), widget layered (`UpdateLayeredWindow`), encaixe automático ao lado da bandeja, flyout, menu de contexto em seções (`Windows11MenuRenderer`, `RethemeMenu`), troca de tema ao vivo, IPC com a janela, `Mem.Trim`. |
+| `Settings.cs` | `AppSettings` (registro `HKCU\Software\NetMonitor`, `ToText`/`FromText`), `Tokens`, `ColorPreset` (8 combinações; `Vivid` e `LightUp`/`LightDown` opcionais), `Pal` (`Resolve`, `FitContrast`: escuro 6,0, claro 5,0, vívidas 4,5), `InvertColors`, `ParseGlyph`, autostart. |
+| `Version.g.cs` | Versão (`AppVersion.Text`) e AssemblyVersion; acompanha `version.txt`. |
+| `Data.cs` | Amostragem da placa de rede e do tráfego por processo, filtro de loopback. |
+| `WidgetRenderer.cs` | Desenho GDI+ do widget (cache de fontes, setas, unidade a 90%, fundos e borda). |
+| `FlyoutRenderer.cs` | Flyout Top 5 (400 px, 5 linhas fixas, ranks, barras, colunas alinhadas, rodapé com link no azul da marca) e `SvgPath`. |
+| `Icons.cs` | Ícones SVG da marca (gerado por `scripts/gen_icons_cs.py`). |
+| `WpfKit.cs` | Kit WPF: `K` (pincéis do tema, escala de fonte), `Ico`, `Sel`, `Btn`, `Seg`, `Switch`, `Input`, `Drop`, `FSlider`. |
+| `SettingsWindow.cs` | 7 páginas (Cores, Layout, Tipografia, Setas, Apps, Geral, Sobre), prévia ao vivo, toast. |
+| `SettingsProcess.cs` | `RemoteHost` (IPC) e o laço do processo `--settings`, com log de exceções. |
+| `Ipc.cs` | `WM_COPYDATA` via `SendMessageTimeout` (300 ms): ApplyLive, ApplySave, Hello, Bye, Sampling, Refresh, Data, ShowPage. |
 | `InstallerApp.cs` | UI e lógica do assistente de instalação WPF (`NetMonitorSetup.exe`). |
 | `Uninstaller.cs` | Executável leve para remoção de atalhos, pastas e entradas do Registro. |
 
@@ -166,7 +166,15 @@ O build:
 2. Compila `NetMonitor.exe`, `uninstall.exe` e `NetMonitorSetup.exe` usando `csc.exe` do .NET Framework 4.
 3. Empacota a pasta `NetMonitor Portable\` com o executável e o `LEIA-ME.txt`.
 4. Inclui o `README.md` atualizado e gera os zips `NetMonitor-Portable-v1.0.0.zip` e `NetMonitor-v1.0.0.zip`.
-5. Valida os arquivos finais na pasta `release\`.
+5. Grava tudo em `release\v<versão>\`.
+
+Restrições do compilador: **C# 5** (sem `?.`, `$""`, `nameof`); WPF via `/lib:...\v4.0.30319\WPF`.
+
+### Testes (sem captura de tela)
+- `scripts\build_rendertest.ps1`: renderiza todas as telas em `bin\shots` (claro/escuro) e testa a ligação de cada controle com `AppSettings`.
+- `scripts\e2e.ps1`: abre o app real e confere hit-test, abertura do menu, encaixe na barra, os dois processos e a RAM.
+- Com a sessão bloqueada o WPF não desenha (PrintWindow sai branco) e o widget se esconde: os testes desligam `HideOnScreensaver` temporariamente; UI Automation lê os textos da janela.
+- PowerShell 5.1: `Get-Content`/`Set-Content` sem `-Encoding` corrompem UTF-8. Edite fontes com `[IO.File]::ReadAllText/WriteAllText` ou Python.
 
 ---
 
@@ -174,7 +182,7 @@ O build:
 
 - **Pasta Local do Drive**: `G:\Meu Drive\NetMonitor`
 - Estrutura no Drive:
-  - `release/`: Contém os instaladores e pacotes zips mais recentes.
+  - `release/vX.Y.Z/`: pacotes de cada versão, em ordem crescente (cópia do instalador e do pacote completo mais recentes na raiz).
   - `docs/`: Documentação, screenshots e assets de marca (`Logomarca/`, `Instagram - Carrossel/`).
   - `_backups/`: Histórico arquivado das versões fechadas (`v1.0.0_pre-wpf/`, `v1.0.0/`, etc.).
 - Para sincronizar, execute:
