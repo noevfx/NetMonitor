@@ -10,7 +10,7 @@
 - **Versão Atual**: `1.0.0` (Lançamento Oficial)
 - **Plataforma**: Windows 11 e Windows 10 (x64 / AnyCPU)
 - **Tecnologia**: C# puro (.NET Framework 4.8 / `csc.exe` nativo) + WPF nativo + GDI+ acelerado.
-- **Filosofia**: Zero dependências pesadas, sem WebView2/Node/Electron, pegada de memória mínima (~12 MB RAM, 0% CPU em repouso), design alinhado ao **Windows 11 Fluent 2**.
+- **Filosofia**: Zero dependências pesadas, sem WebView2/Node/Electron. Arquitetura de processos duplos para estabilidade e isolamento: Widget em background (~0.1% CPU, ~55 MB RAM) e Janela de Configurações WPF sob demanda (~135-150 MB RAM, desalocada imediatamente ao fechar). Consumo combinado no pico com ambas as janelas abertas: ~190-200 MB RAM. Design alinhado ao **Windows 11 Fluent 2**.
 - **Autor / Empresa**: Eduardo Noé ([Noé VFX](https://noevfx.com)) — `labs@noevfx.com`
 - **Chave Pix (Doação na aba Sobre)**: `a772dce2-7cf6-45db-a699-2102e189b30b` (Nubank PJ)
 

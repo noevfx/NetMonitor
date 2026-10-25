@@ -9,7 +9,8 @@ Todas as alterações notáveis deste projeto seguem o padrão de **Versionament
 ### Destaques da Versão Final (Arquitetura WPF Nativa)
 - **Reescrita Completa da Interface em WPF Nativo (Sem HTML/WebView2):**
   - Toda a Central de Configurações (`SettingsWindow.cs`) e o Instalador Oficial (`InstallerApp.cs`) foram recriados em XAML/WPF nativo puro com aceleração por hardware do Windows.
-  - Eliminação total de qualquer dependência de Chromium, WebView2 ou arquivos HTML embutidos em tempo de execução, garantindo inicialização instantânea (<100ms) e consumo mínimo de memória RAM (~12 MB).
+  - Eliminação total de qualquer dependência de Chromium, WebView2 ou arquivos HTML embutidos em tempo de execução, garantindo inicialização instantânea (<100ms).
+  - Arquitetura de dois processos isolados via IPC (Named Pipes): widget contínuo em background (~0.1% CPU, ~55 MB RAM) e configurações sob demanda (~135 MB RAM, liberada ao fechar). Consumo total no pico: ~190 MB RAM.
 - **Flyout de Aplicativos em Tempo Real com Animação Bézier:**
   - Painel suspenso suave renderizado via GDI+ com curva `cubic-bezier(0, 0, 0, 1)` de 280ms.
   - Exibição em tempo real dos 5 processos com maior consumo de largura de banda, com divisão clara entre Download (RX) e Upload (TX).

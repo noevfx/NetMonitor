@@ -18,30 +18,42 @@
 
 ---
 
-## ⚡ Visão Geral
+## ⚡ Visão Geral & Arquitetura de Processos
 
-O **NetMonitor** é um aplicativo nativo ultraleve projetado especificamente para o Windows 11 e 10. Ele exibe continuamente as taxas de transferência de **Upload (TX)** e **Download (RX)** da sua rede ativa com visual moderno alinhado aos padrões do **Fluent 2 Design**.
+O **NetMonitor** é um aplicativo nativo projetado para o Windows 11 e 10 que monitora continuamente as taxas de **Upload (TX)** e **Download (RX)** da sua rede ativa, além de inspecionar em tempo real o tráfego individual dos aplicativos que mais consomem largura de banda.
 
-Construído em **C# puro e WPF**, sem dependências externas e **sem WebView2 ou Chromium embutido**, o NetMonitor consome praticamente **0.0% de CPU** e apenas cerca de **~10 a 12 MB de memória RAM**, garantindo que seu sistema permaneça rápido e responsivo mesmo durante sessões intensas de trabalho, render, edição ou jogos.
+Construído em **C# puro e WPF nativo**, sem Chromium e **sem WebView2 embutido**, o NetMonitor adota uma **arquitetura de dois processos isolados** para máxima estabilidade e eficiência de recursos:
+
+1. **Processo Principal (`NetMonitor.exe`) — Widget & Monitoramento em Segundo Plano:**
+   - Permanece ativo na barra de tarefas ou flutuando na tela.
+   - Amostragem contínua via `GetExtendedTcpTable` e filtros de placa física.
+   - **Consumo**: apenas **~0.1% de CPU** e **~55 a 65 MB de RAM**.
+2. **Processo Secundário (`NetMonitor.exe --settings`) — Central de Configurações WPF:**
+   - Inicia de forma isolada exclusivamente quando você abre as configurações.
+   - Comunica-se com o processo principal via canal de IPC ultrarrápido (*Named Pipes*).
+   - Renderiza a suíte completa de customização com aceleração por hardware e painel lateral de *Live Preview* em tempo real.
+   - **Consumo**: **~135 a 150 MB de RAM** exclusivamente enquanto a janela estiver aberta.
+   - **Desalocação Completa**: ao fechar a janela de configurações, esse processo é imediatamente encerrado e toda a memória é liberada para o sistema.
+3. **Consumo Total Combinado**: cerca de **~190 a 200 MB de RAM** apenas no pico de uso com ambas as janelas abertas simultaneamente.
 
 ---
 
 ## ✨ Recursos Completos & Detalhados
 
 ### 🚀 1. Performance Nativa & Discrição
-- **100% Nativo (.NET Framework 4.8)**: Executa com o runtime padrão do Windows. Sem Node.js, sem Electron e sem navegadores em segundo plano.
-- **Pegada de Memória Mínima**: ~10 a 12 MB de RAM e 0% de CPU em repouso.
+- **100% Nativo (.NET Framework 4.8)**: Executa com o runtime padrão do Windows. Sem dependências pesadas, sem Node.js e sem navegadores embutidos.
+- **CPU Mínima (~0.1%)**: Loop de telemetria otimizado com timers cooperativos que não interferem em jogos ou renders pesados.
 - **Boot 100% Silencioso**: Inicia junto com o Windows de forma imperceptível, sem emitir notificações ou toasts irritantes no carregamento.
 - **Privacidade & Descanso de Tela**: O widget se oculta automaticamente quando o protetor de tela é acionado ou quando o Windows é bloqueado (`Win + L`).
 
 ### 🎨 2. Cores & Tema (Fluent 2)
 - **Tema Dinâmico**: Alternância fluida entre **Modo Escuro**, **Modo Claro** ou sincronização automática com o tema do Windows.
-- **4 Paletas Assinadas com Calibração de Contraste**:
-  1. ⚪ **Monocromático (`pure_mono`)**: Branco no tema escuro, preto no claro. Minimalismo puro de alto contraste.
+- **4 Paletas Assinadas com Calibração Científica de Contraste**:
+  1. ⚪ **Monocromático (`pure_mono`)**: Branco no tema escuro, preto no claro (máximo contraste e elegância).
   2. 💠 **Cor de Destaque (`accent`)**: Conecta-se em tempo real com a cor de destaque do seu Windows (lida dinamicamente do DWM).
-  3. 🔶 **Âmbar & Céu (`ambar_ceu`)**: Par cromático baseado na escala científica Okabe-Ito, garantindo acessibilidade e segurança para pessoas com daltonismo.
+  3. 🔶 **Âmbar & Céu (`ambar_ceu`)**: Par cromático baseado na escala Okabe-Ito, 100% acessível e seguro para pessoas com daltonismo.
   4. 🔮 **Aurora (`aurora`)**: Combinação estética e suave de lavanda e menta.
-- **Cores Customizadas**: Opção para definir manualmente qualquer cor hexadecimal personalizada para Upload e Download.
+- **Cores Customizadas**: Seletor livre para definir qualquer cor hexadecimal personalizada para Upload e Download individualmente.
 
 ### 📐 3. Layout & Estilo do Widget
 - **Modos de Exibição**:
@@ -57,7 +69,7 @@ Construído em **C# puro e WPF**, sem dependências externas e **sem WebView2 ou
   - Opção para ocultar ou exibir o rótulo de unidade.
 
 ### 🔤 4. Tipografia & Fim do Tremor de Dígitos
-- **Dígitos Tabulares (`tnum`)**: Largura numérica fixa para eliminar o tremor (*jitter*) na tela conforme as taxas de velocidade oscilam.
+- **Dígitos Tabulares (`tnum`)**: Largura numérica fixa para eliminar de vez o tremor (*jitter*) na tela conforme as taxas oscilam.
 - **Famílias Nativas Suportadas**: Segoe UI Variable Display, Segoe UI, Cascadia Code, Consolas e Arial.
 - **Controle Fino de Escala**: Slider de tamanho de fonte e seleção de peso (Regular, SemiBold, Bold).
 
@@ -136,6 +148,7 @@ Construído em **C# puro e WPF**, sem dependências externas e **sem WebView2 ou
 
 - **Sistema Operacional**: Windows 11 ou Windows 10 (64-bit recomendado).
 - **Framework**: .NET Framework 4.8 (nativo e já pré-instalado no Windows).
+- **Memória RAM**: ~55 MB (modo widget contínuo) / ~190 MB (durante uso da central de configurações).
 - **GPU**: Compatível com qualquer acelerador gráfico padrão (GDI+/WPF com aceleração por hardware).
 
 ---
