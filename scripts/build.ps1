@@ -1,4 +1,4 @@
-# ==============================================================================
+﻿# ==============================================================================
 # NetMonitor - Script de Build Automatizado
 # Gera os pacotes organizados na pasta release\vX.Y.Z\:
 #   1. NetMonitorSetup.exe (Instalador nativo WPF)
@@ -7,6 +7,8 @@
 #   4. NetMonitor-vX.Y.Z.zip (Pacote completo com instalador + portátil + README)
 # ==============================================================================
 
+# -PackageOnly: só refaz README/zips com os .exe já compilados em bin\ (mantém os hashes já enviados ao VirusTotal)
+param([switch]$PackageOnly)
 $ErrorActionPreference = "Stop"
 
 $projectRoot = Split-Path $PSScriptRoot -Parent
@@ -38,6 +40,10 @@ foreach ($dir in @($binDir, $releaseDir)) {
 
 # 3. Compilar NetMonitor.exe (widget + flyout + janela de configurações WPF)
 $netMonitorExe = Join-Path $binDir "NetMonitor.exe"
+$uninstallerExe = Join-Path $binDir "uninstall.exe"
+$installerExe = Join-Path $binDir "NetMonitorSetup.exe"
+$releaseSetup = Join-Path $releaseDir "NetMonitorSetup.exe"
+if (-not $PackageOnly) {
 Write-Host "1. Compilando NetMonitor.exe..." -ForegroundColor Cyan
 & $csc /nologo /target:winexe /optimize+ /platform:anycpu /win32icon:$iconPath /lib:$wpf `
     /r:$wpfRefs `
@@ -66,7 +72,21 @@ Write-Host "3. Compilando NetMonitorSetup.exe..." -ForegroundColor Cyan
     /out:$installerExe `
     "$srcDir\InstallerApp.cs" "$srcDir\Settings.cs" "$srcDir\Version.g.cs" "$srcDir\Icons.cs" "$srcDir\WpfKit.cs"
 if ($LASTEXITCODE -ne 0) { throw "Falha ao compilar NetMonitorSetup.exe" }
+}
 Copy-Item -Path $installerExe -Destination $releaseSetup -Force
+
+# 5b. Hashes SHA-256 dos executáveis no README (entre os marcadores hashes:start/end).
+# Só os .exe: o hash de um zip não pode ir no README que está dentro dele.
+if (Test-Path $readmeFile) {
+    $rows = foreach ($exe in @($installerExe, $netMonitorExe)) {
+        $h = (Get-FileHash $exe -Algorithm SHA256).Hash.ToLower()
+        "| ``$(Split-Path $exe -Leaf)`` | ``$h`` | [relatório](https://www.virustotal.com/gui/file/$h) |"
+    }
+    $block = "<!-- hashes:start -->`n| Arquivo (v$version) | SHA-256 | VirusTotal |`n| :--- | :--- | :--- |`n" + ($rows -join "`n") + "`n<!-- hashes:end -->"
+    $txt = [System.IO.File]::ReadAllText($readmeFile)
+    $txt = [regex]::Replace($txt, '(?s)<!-- hashes:start -->.*?<!-- hashes:end -->', $block.Replace('$', '$$'))
+    [System.IO.File]::WriteAllText($readmeFile, $txt, (New-Object System.Text.UTF8Encoding($false)))
+}
 
 # 6. Versão portátil com README
 Write-Host "4. Empacotando versão portátil em release\..." -ForegroundColor Cyan
@@ -92,6 +112,9 @@ Esta é a versão portátil oficial do NetMonitor.
 - Pode ser executado diretamente de qualquer pasta ou pendrive.
 - Para usar, basta dar um duplo clique em NetMonitor.exe.
 - Para abrir as Configurações, clique com o botão direito no widget e escolha 'Configurações...'.
+- No primeiro uso, o Windows pode exibir o aviso do SmartScreen por ser um app independente novo,
+  sem assinatura digital. Clique em 'Mais informações' e depois em 'Executar assim mesmo'.
+  Os hashes SHA-256 e os relatórios do VirusTotal estão no README.md.
 
 [EN]
 This is the official portable version of NetMonitor.
@@ -99,6 +122,8 @@ This is the official portable version of NetMonitor.
 - Can be run directly from any folder or USB drive.
 - To use, simply double-click NetMonitor.exe.
 - To open Settings, right-click the widget and choose 'Configurações... / Settings...'.
+- On first run, Windows SmartScreen may warn about a new, unsigned independent app.
+  Click 'More info' and then 'Run anyway'. SHA-256 hashes and VirusTotal reports are in README.md.
 ==============================================================================
 "@
 [System.IO.File]::WriteAllText((Join-Path $portableDir "LEIA-ME.txt"), $readmeContent, (New-Object System.Text.UTF8Encoding($true)))

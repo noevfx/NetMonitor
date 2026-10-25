@@ -1,4 +1,4 @@
-# Teste de ponta a ponta do NetMonitor de desenvolvimento (sem captura de tela):
+﻿# Teste de ponta a ponta do NetMonitor de desenvolvimento (sem captura de tela):
 #  - confere o hit-test do widget (WindowFromPoint em área "vazia" deve devolver o widget)
 #  - abre as configurações por duplo clique e captura a janela com PrintWindow
 param([string]$Exe = "D:\_Antigravity\NetMonitor\bin\dev\NetMonitor.exe", [string]$Out = "D:\_Antigravity\NetMonitor\bin\shots", [string]$Clicks = "", [string]$Shot2 = "real_settings_after.png")

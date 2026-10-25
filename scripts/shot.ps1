@@ -1,4 +1,4 @@
-# Captura uma região da tela em pixels físicos. Uso: shot.ps1 -X 0 -Y 0 -W 800 -H 600 -Out arquivo.png
+﻿# Captura uma região da tela em pixels físicos. Uso: shot.ps1 -X 0 -Y 0 -W 800 -H 600 -Out arquivo.png
 param([int]$X, [int]$Y, [int]$W, [int]$H, [string]$Out)
 Add-Type @"
 using System; using System.Runtime.InteropServices;

@@ -1,4 +1,4 @@
-# Compila apenas o NetMonitor.exe de desenvolvimento em bin\dev (não mexe em release\ nem na versão instalada).
+﻿# Compila apenas o NetMonitor.exe de desenvolvimento em bin\dev (não mexe em release\ nem na versão instalada).
 $ErrorActionPreference = "Stop"
 $root = Split-Path $PSScriptRoot -Parent
 $csc = "C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe"

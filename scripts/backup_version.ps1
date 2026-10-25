@@ -1,4 +1,4 @@
-# ==============================================================================
+﻿# ==============================================================================
 # NetMonitor - Script de Backup Incremental de Versão
 # Uso: .\backup_version.ps1 [-Version "1.0.0"]
 # Congela a versão estável atual em _backups\ e espelha no Google Drive.
