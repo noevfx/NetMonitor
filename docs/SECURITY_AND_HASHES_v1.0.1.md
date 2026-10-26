@@ -1,4 +1,4 @@
-﻿### 🛡️ Verificação de Integridade Criptográfica (SHA-256) & Segurança
+### 🛡️ Verificação de Integridade Criptográfica (SHA-256) & Segurança
 
 | Arquivo | Tamanho | Hash SHA-256 | Auditoria VirusTotal |
 | :--- | :--- | :--- | :--- |
@@ -6,3 +6,15 @@
 | **`NetMonitor-v1.0.1.zip`** | 306.1 KB | `66a3ac92ebe030a5ed0504ee28e3839bc860cfff91d1ebfeb5a431c0e6c89a31` | [0/53 Deteccoes (100% Limpo)](https://www.virustotal.com/gui/file/66a3ac92ebe030a5ed0504ee28e3839bc860cfff91d1ebfeb5a431c0e6c89a31) |
 | **`NetMonitorSetup.exe`** | 360.5 KB | `2ec62ea9ec68f48992938db7093cc07d051f7934b64d7631b01ed00c2d5ca14c` | [3/65 (Heuristica/Nao assinado)](https://www.virustotal.com/gui/file/2ec62ea9ec68f48992938db7093cc07d051f7934b64d7631b01ed00c2d5ca14c) |
 | **`NetMonitor.exe`** | 229.5 KB | `d62baa4e6a01239e0f581cc87a110532f99c8ab3c6ee370a9c361f2ca04c8818` | [2/69 (Heuristica/Nao assinado)](https://www.virustotal.com/gui/file/d62baa4e6a01239e0f581cc87a110532f99c8ab3c6ee370a9c361f2ca04c8818) |
+
+---
+
+### 🏛️ Auditoria e Disputa de Falso Positivo na Microsoft (WDSI)
+
+- **Arquivo Submetido:** `NetMonitorSetup.exe`
+- **Hash SHA-256:** `2ec62ea9ec68f48992938db7093cc07d051f7934b64d7631b01ed00c2d5ca14c`
+- **Submission ID:** `51203889-c7aa-43be-bcf4-f6bb16b40cd8`
+- **Submetido por:** `labs@noevfx.com` (*Noé VFX Labs*)
+- **Data/Hora:** `25/10/2026 21:22:17`
+- **Status Atual:** `Pending (Em análise pela equipe da Microsoft Security Intelligence)`
+
