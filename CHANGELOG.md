@@ -4,6 +4,62 @@ Versionamento semântico (`MAJOR.MINOR.PATCH`). Cada versão tem sua pasta em `r
 
 ---
 
+## [1.0.5] — 2026-11-06
+
+### Corrigido
+- A versão interna do executável e do instalador agora diz **1.0.5** (a 1.0.4 ainda se identificava como 1.0.3 em "Programas" e nas propriedades do arquivo).
+
+### Alterado
+- Fabricante, publicador e copyright dos executáveis e da `LICENSE` passam a ser **Noé VFX** (antes, o nome pessoal do autor). Licença continua MIT.
+
+---
+
+## [1.0.4] — 2026-11-06
+
+### Alterado
+- O link do GitHub no rodapé e em Sobre agora aponta para `github.com/noevfx` (nova conta). Nenhuma outra mudança. (Build enviado à Microsoft; internamente ainda se identificava como 1.0.3, corrigido na 1.0.5.)
+
+---
+
+## [1.0.3] — 2026-11-02
+
+### Desempenho
+- Widget ocioso: **~38% menos CPU** (1,67% → 1,04% de um núcleo) e **~14% menos memória** (40,1 → 34,3 MB). A verificação de tela cheia só refaz o trabalho quando o primeiro plano muda; o tema deixou de ser lido do registro a cada segundo; TOPMOST e reposicionamento foram espaçados.
+- Flyout e prévia das Configurações reaproveitam bitmap e fontes. Fim da alocação de ~633 KB por segundo no LOH a cada flyout aberto.
+- Configurações: abas criadas sob demanda, tick sem redesenho quando nada muda, tema com validade curta e `Changed()` sem `UpdateLayout` síncrono (arrastar sliders não engasga mais).
+- Coleta: buffers nativos reaproveitados em `GetExtendedTcpTable`/`GetExtendedUdpTable`, leitura por offset (sem `PtrToStructure` por linha) e menos alocações por amostra.
+- `LayeredWindow` reutiliza DC/DIB por janela; o widget reaproveita bitmap e métricas de layout.
+- Caches de cor (`Pal.Resolve`, `K.C`, `Hex`), formatação de velocidade e DPI.
+
+### Corrigido
+- Widget travado: `RenderIfChanged` agora atualiza a formatação antes de comparar a chave.
+- Normalização da amostragem não altera mais o dicionário durante a enumeração (exceção a cada segundo no .NET Framework).
+- Log de emergência em `%LOCALAPPDATA%\NetMonitor\crash.log` para exceções de UI, threads de fundo e tarefas.
+- Instalador preserva as preferências existentes em atualizações (idioma, trava de posição e posição customizada).
+- Desinstalador solicita elevação e remove a pasta sem `cmd.exe`; o que estiver em uso sai no próximo reinício.
+- `Mem.Trim` não força mais `GC.Collect` na inicialização.
+
+### Segurança e transparência
+- Atalhos criados por `IShellLink`/`IPersistFile` estáticos; removidos `WScript.Shell`, `ProgID`, `Activator` e `dynamic`.
+- Removido `cmd.exe` oculto do desinstalador (T1059) e o uso de WMI do script de desenvolvimento (T1047).
+- Encerramento gracioso de instâncias (`CloseMainWindow` antes de `Kill`).
+- Manifestos explícitos: `asInvoker` no app/instalador e `requireAdministrator` no desinstalador; `supportedOS` Windows 8.1/10/11.
+- Versão, empresa e descrição presentes nos três executáveis.
+- `build.ps1` assina automaticamente quando `NETMONITOR_SIGN_PFX`/`NETMONITOR_SIGN_PASSWORD` estão configurados.
+- Auditoria completa em `docs/SECURITY_AUDIT_v1.0.3.md` e plano de performance em `docs/PLANO_PERFORMANCE.md`.
+
+---
+
+## [1.0.2] — 2026-10-31
+
+### Corrigido
+- Unificação de processos por aplicativo: múltiplos processos do mesmo aplicativo (como `ollama.exe`, `ollama app.exe` e `llama-server.exe`, ou múltiplos processos do Edge, Chrome e VS Code) agora são agregados e unificados em uma única linha no Flyout, somando o tráfego total de rede de todos os seus processos filhos e auxiliares.
+- Calibração bidirecional de Upload e Download: a amostragem de processos agora é calibrada proporcionalmente pela velocidade real da placa de rede física (`physRx` e `physTx`), garantindo que o consumo exibido por aplicativo feche com 100% de precisão com o total da placa, do widget e do rodapé.
+- Medição de sockets assíncronos no Windows: adicionado suporte a `OtherTransferCount` (Winsock IOCP / AFD) para capturar o fluxo de rede de aplicações assíncronas (como Ollama, Node, Go e navegadores), eliminando a leitura de download zerada (0,0 Mbps).
+- Isolamento de I/O de disco: gravação de arquivos baixados em disco é isolada da rede, eliminando falsos picos de upload decorrentes de escrita no SSD.
+
+---
+
 ## [1.0.1] — 2026-10-25
 
 ### Corrigido

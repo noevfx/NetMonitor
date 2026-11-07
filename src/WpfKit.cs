@@ -46,9 +46,18 @@ namespace NetMonitor.Ui
             return b;
         }
 
+        // ColorConverter é caro e as mesmas cores são convertidas a cada troca de tema/controle.
+        static readonly Dictionary<string, Color> colorCache = new Dictionary<string, Color>();
+
         public static Color C(string hex)
         {
-            return (Color)ColorConverter.ConvertFromString(hex);
+            if (string.IsNullOrEmpty(hex)) return Colors.Transparent;
+            Color c;
+            if (colorCache.TryGetValue(hex, out c)) return c;
+            try { c = (Color)ColorConverter.ConvertFromString(hex); }
+            catch { c = Colors.Transparent; }
+            colorCache[hex] = c;
+            return c;
         }
 
         public static SolidColorBrush Fixed(string hex)

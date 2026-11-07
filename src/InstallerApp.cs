@@ -10,6 +10,7 @@ using System.IO;
 using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Security.Principal;
+using System.Text;
 using System.Threading;
 using System.Windows;
 using System.Windows.Controls;
@@ -21,9 +22,9 @@ using NetMonitor.Ui;
 
 [assembly: AssemblyTitle("NetMonitor Setup")]
 [assembly: AssemblyDescription("Instalador do NetMonitor para Windows 11")]
-[assembly: AssemblyCompany("Eduardo Noé")]
+[assembly: AssemblyCompany("Noé VFX")]
 [assembly: AssemblyProduct("NetMonitor")]
-[assembly: AssemblyCopyright("Copyright © 2026 Eduardo Noé")]
+[assembly: AssemblyCopyright("Copyright © 2026 Noé VFX")]
 
 namespace NetMonitor
 {
@@ -273,15 +274,28 @@ namespace NetMonitor
             }));
         }
 
+        // Primeiro tenta fechar pela janela; só encerra à força se o app não responder.
+        static void StopPreviousInstances()
+        {
+            int self = Process.GetCurrentProcess().Id;
+            foreach (Process p in Process.GetProcessesByName("NetMonitor"))
+            {
+                try
+                {
+                    if (p.Id == self) continue;
+                    if (p.CloseMainWindow()) p.WaitForExit(1500);
+                    if (!p.HasExited) { p.Kill(); p.WaitForExit(1500); }
+                }
+                catch { }
+            }
+        }
+
         void DoInstall(string installDir, bool boot, bool menu, bool desk, bool isPt)
         {
             try
             {
                 Progress(10, isPt ? "Fechando instâncias anteriores..." : "Closing previous instances...");
-                foreach (Process p in Process.GetProcessesByName("NetMonitor"))
-                {
-                    try { p.Kill(); p.WaitForExit(1500); } catch { }
-                }
+                StopPreviousInstances();
 
                 if (!Directory.Exists(installDir)) Directory.CreateDirectory(installDir);
                 Progress(35, isPt ? "Copiando os arquivos..." : "Copying files...");
@@ -294,14 +308,13 @@ namespace NetMonitor
                 try { string old = Path.Combine(installDir, "settings.html"); if (File.Exists(old)) File.Delete(old); } catch { }
 
                 Progress(75, isPt ? "Registrando no Windows..." : "Registering with Windows...");
+                // Em atualização, preserva as preferências existentes; só define padrões na primeira instalação.
                 using (RegistryKey app = Registry.CurrentUser.CreateSubKey(@"Software\NetMonitor"))
                 {
                     if (app != null)
                     {
-                        app.SetValue("Language", isPt ? "pt" : "en");
-                        app.SetValue("IsLocked", 1, RegistryValueKind.DWord);
-                        try { app.DeleteValue("CustomX", false); } catch { }
-                        try { app.DeleteValue("CustomY", false); app.DeleteValue("CustomPos", false); } catch { }
+                        if (app.GetValue("Language") == null) app.SetValue("Language", isPt ? "pt" : "en");
+                        if (app.GetValue("IsLocked") == null) app.SetValue("IsLocked", 1, RegistryValueKind.DWord);
                     }
                 }
                 if (boot)
@@ -319,7 +332,7 @@ namespace NetMonitor
                     {
                         u.SetValue("DisplayName", "NetMonitor");
                         u.SetValue("DisplayVersion", AppVersion.Text);
-                        u.SetValue("Publisher", "Eduardo Noé");
+                        u.SetValue("Publisher", "Noé VFX");
                         u.SetValue("InstallLocation", installDir);
                         u.SetValue("DisplayIcon", exePath + ",0");
                         u.SetValue("UninstallString", "\"" + uninstallerPath + "\"");
@@ -356,18 +369,61 @@ namespace NetMonitor
                 s.CopyTo(fs);
         }
 
+        // COM estático (IShellLink) em vez de WScript.Shell por ProgID/reflexão: sem resolução dinâmica.
+        [ComImport, Guid("00021401-0000-0000-C000-000000000046"), ClassInterface(ClassInterfaceType.None)]
+        class ShellLink { }
+
+        [ComImport, InterfaceType(ComInterfaceType.InterfaceIsIUnknown), Guid("000214F9-0000-0000-C000-000000000046")]
+        interface IShellLinkW
+        {
+            void GetPath([Out, MarshalAs(UnmanagedType.LPWStr)] StringBuilder pszFile, int cch, IntPtr pfd, uint fFlags);
+            void GetIDList(out IntPtr ppidl);
+            void SetIDList(IntPtr pidl);
+            void GetDescription([Out, MarshalAs(UnmanagedType.LPWStr)] StringBuilder pszName, int cch);
+            void SetDescription([MarshalAs(UnmanagedType.LPWStr)] string pszName);
+            void GetWorkingDirectory([Out, MarshalAs(UnmanagedType.LPWStr)] StringBuilder pszDir, int cch);
+            void SetWorkingDirectory([MarshalAs(UnmanagedType.LPWStr)] string pszDir);
+            void GetArguments([Out, MarshalAs(UnmanagedType.LPWStr)] StringBuilder pszArgs, int cch);
+            void SetArguments([MarshalAs(UnmanagedType.LPWStr)] string pszArgs);
+            void GetHotkey(out short pwHotkey);
+            void SetHotkey(short wHotkey);
+            void GetShowCmd(out int piShowCmd);
+            void SetShowCmd(int iShowCmd);
+            void GetIconLocation([Out, MarshalAs(UnmanagedType.LPWStr)] StringBuilder pszIconPath, int cch, out int piIcon);
+            void SetIconLocation([MarshalAs(UnmanagedType.LPWStr)] string pszIconPath, int iIcon);
+            void SetRelativePath([MarshalAs(UnmanagedType.LPWStr)] string pszPathRel, int dwReserved);
+            void Resolve(IntPtr hwnd, int fFlags);
+            void SetPath([MarshalAs(UnmanagedType.LPWStr)] string pszFile);
+        }
+
+        [ComImport, InterfaceType(ComInterfaceType.InterfaceIsIUnknown), Guid("0000010b-0000-0000-C000-000000000046")]
+        interface IPersistFile
+        {
+            void GetClassID(out Guid pClassID);
+            [PreserveSig] int IsDirty();
+            void Load([MarshalAs(UnmanagedType.LPWStr)] string pszFileName, uint dwMode);
+            void Save([MarshalAs(UnmanagedType.LPWStr)] string pszFileName, [MarshalAs(UnmanagedType.Bool)] bool fRemember);
+            void SaveCompleted([MarshalAs(UnmanagedType.LPWStr)] string pszFileName);
+            void GetCurFile([MarshalAs(UnmanagedType.LPWStr)] out string ppszFileName);
+        }
+
         static void Shortcut(string path, string target, string workDir, string description)
         {
+            object link = null;
             try
             {
-                Type t = Type.GetTypeFromProgID("WScript.Shell");
-                if (t == null) return;
-                dynamic shell = Activator.CreateInstance(t);
-                dynamic sc = shell.CreateShortcut(path);
-                sc.TargetPath = target; sc.WorkingDirectory = workDir; sc.Description = description;
-                sc.Save();
+                link = new ShellLink();
+                IShellLinkW sl = (IShellLinkW)link;
+                sl.SetPath(target);
+                sl.SetWorkingDirectory(workDir);
+                sl.SetDescription(description);
+                ((IPersistFile)link).Save(path, true);
             }
             catch { }
+            finally
+            {
+                if (link != null) { try { Marshal.ReleaseComObject(link); } catch { } }
+            }
         }
 
         [STAThread]

@@ -6,12 +6,12 @@
 
 ### Upload e download em tempo real, direto na barra de tarefas do Windows 11
 
-[![Windows 11](https://img.shields.io/badge/Windows-11%20%7C%2010-0078d4?style=flat-square&logo=windows&logoColor=white)](https://github.com/eduardonoe/NetMonitor)
-[![.NET Framework](https://img.shields.io/badge/.NET%20Framework-4.8%20nativo-512bd4?style=flat-square&logo=dotnet&logoColor=white)](https://github.com/eduardonoe/NetMonitor)
-[![Versão](https://img.shields.io/badge/Versão-1.0.1-success?style=flat-square)](https://github.com/eduardonoe/NetMonitor/releases/tag/v1.0.1)
+[![Windows 11](https://img.shields.io/badge/Windows-11%20%7C%2010-0078d4?style=flat-square&logo=windows&logoColor=white)](https://github.com/noevfx/NetMonitor)
+[![.NET Framework](https://img.shields.io/badge/.NET%20Framework-4.8%20nativo-512bd4?style=flat-square&logo=dotnet&logoColor=white)](https://github.com/noevfx/NetMonitor)
+[![Versão](https://img.shields.io/badge/Versão-1.0.5-success?style=flat-square)](https://github.com/noevfx/NetMonitor/releases/tag/v1.0.5)
 [![Licença](https://img.shields.io/badge/Licença-MIT-blue?style=flat-square)](LICENSE)
 
-[**Instalador (.exe)**](https://github.com/eduardonoe/NetMonitor/releases/download/v1.0.1/NetMonitorSetup.exe) &nbsp;|&nbsp; [**Portátil (.zip)**](https://github.com/eduardonoe/NetMonitor/releases/download/v1.0.1/NetMonitor-Portable-v1.0.1.zip) &nbsp;|&nbsp; [**Pacote completo (.zip)**](https://github.com/eduardonoe/NetMonitor/releases/download/v1.0.1/NetMonitor-v1.0.1.zip)
+[**Instalador (.exe)**](https://github.com/noevfx/NetMonitor/releases/download/v1.0.5/NetMonitorSetup.exe) &nbsp;|&nbsp; [**Portátil (.zip)**](https://github.com/noevfx/NetMonitor/releases/download/v1.0.5/NetMonitor-Portable-v1.0.5.zip) &nbsp;|&nbsp; [**Pacote completo (.zip)**](https://github.com/noevfx/NetMonitor/releases/download/v1.0.5/NetMonitor-v1.0.5.zip)
 
 </div>
 
@@ -27,8 +27,8 @@ O **NetMonitor** mostra as taxas de **upload (TX)** e **download (RX)** ao lado 
 
 | Processo | Função | RAM |
 | :--- | :--- | :--- |
-| `NetMonitor.exe` | Widget, flyout e menu (Windows Forms + GDI+, nunca carrega WPF) | **~12 a 18 MB** |
-| `NetMonitor.exe --settings` | Janela de Configurações em WPF, aberta só quando você pede | ~135 MB, **liberados ao fechar** |
+| `NetMonitor.exe` | Widget, flyout e menu (Windows Forms + GDI+, nunca carrega WPF) | **~22 MB privados** (working set de 6 a 35 MB) |
+| `NetMonitor.exe --settings` | Janela de Configurações em WPF, aberta só quando você pede | **~125 a 135 MB**, liberados ao fechar |
 
 Os dois conversam por mensagens do Windows (`WM_COPYDATA`): a janela mostra a prévia ao vivo e o widget aplica as mudanças na hora.
 
@@ -130,7 +130,7 @@ Todas as telas são geradas por `scripts\build_rendertest.ps1 -Gallery`.
 ## Instalação
 
 1. **Instalador** (`NetMonitorSetup.exe`): instala em `%LocalAppData%\Programs\NetMonitor` (sem administrador), cria atalhos e o desinstalador.
-2. **Portátil** (`NetMonitor-Portable-v1.0.1.zip`): descompacte e abra `NetMonitor.exe`. As preferências ficam em `HKCU\Software\NetMonitor`.
+2. **Portátil** (`NetMonitor-Portable-v1.0.5.zip`): descompacte e abra `NetMonitor.exe`. As preferências ficam em `HKCU\Software\NetMonitor`.
 
 **Requisitos:** Windows 11 ou 10, .NET Framework 4.8 (já vem no Windows).
 
@@ -148,13 +148,20 @@ Get-FileHash .\NetMonitorSetup.exe -Algorithm SHA256
 ```
 
 <!-- hashes:start -->
-| Arquivo (v1.0.1) | SHA-256 | VirusTotal |
+| Arquivo (v1.0.5) | SHA-256 | VirusTotal |
 | :--- | :--- | :--- |
-| `NetMonitorSetup.exe` | `2ec62ea9ec68f48992938db7093cc07d051f7934b64d7631b01ed00c2d5ca14c` | [relatório](https://www.virustotal.com/gui/file/2ec62ea9ec68f48992938db7093cc07d051f7934b64d7631b01ed00c2d5ca14c) |
-| `NetMonitor.exe` | `d62baa4e6a01239e0f581cc87a110532f99c8ab3c6ee370a9c361f2ca04c8818` | [relatório](https://www.virustotal.com/gui/file/d62baa4e6a01239e0f581cc87a110532f99c8ab3c6ee370a9c361f2ca04c8818) |
+| `NetMonitorSetup.exe` | `ab2d195084ec27734c3c0171c63c27aee60996dd3b9f12b779e14820c387bd19` | [relatório](https://www.virustotal.com/gui/file/ab2d195084ec27734c3c0171c63c27aee60996dd3b9f12b779e14820c387bd19) |
+| `NetMonitor.exe` | `c0c7f7a6eb0a49424b306874f508ae0952f905d78de58b8138e685b22dd06d29` | [relatório](https://www.virustotal.com/gui/file/c0c7f7a6eb0a49424b306874f508ae0952f905d78de58b8138e685b22dd06d29) |
 <!-- hashes:end -->
 
-Os hashes dos zips e o resultado completo do VirusTotal ficam nas notas de cada release. Executáveis novos sem assinatura digital podem receber alertas de motores de *machine learning* (nomes terminados em `!ml` ou "ml.score"), que avaliam o formato do arquivo, não um vírus conhecido. O relatório completo de cada arquivo está nos links acima.
+**Resultado no VirusTotal em 06/11/2026 (v1.0.5):** `NetMonitorSetup.exe` **4/70** (CrowdStrike, Cylance, APEX e Trapmine) e `NetMonitor.exe` **2/71** (APEX e Trapmine). Não há detecção de família de malware: todos os alertas são de *machine learning* por falta de assinatura digital. Na 1.0.3 a própria Microsoft analisou o executável no portal de segurança (WDSI, submission `ff1b8e70-808d-45bf-8ccf-2ede834c4fad`) e atestou **No malware detected**; a 1.0.5 foi enviada à Microsoft em 06/11/2026 (submission `276f452b-5e63-4ad1-a770-050cc5b1a40c`) e aguarda análise.
+
+Todos os executáveis da Noé VFX Labs ficam na [coleção pública no VirusTotal](https://www.virustotal.com/gui/collection/4baaa336745245003c10c490999bab6c0e45ccbd5579ea716ce6b25407cacc65).
+
+Os hashes dos zips e os relatórios completos estão em [`docs/SECURITY_AND_HASHES_v1.0.5.md`](docs/SECURITY_AND_HASHES_v1.0.5.md). A auditoria técnica, o que foi corrigido e o que ainda depende de assinatura de código estão em [`docs/SECURITY_AUDIT_v1.0.4.md`](docs/SECURITY_AUDIT_v1.0.4.md).
+
+> [!IMPORTANT]
+> A correção definitiva para SmartScreen e para os alertas de *machine learning* é a **assinatura Authenticode**. Até lá, o Windows pode exibir "Editor desconhecido". O `build.ps1` já assina automaticamente quando `NETMONITOR_SIGN_PFX` e `NETMONITOR_SIGN_PASSWORD` estão configurados.
 
 ---
 
@@ -165,13 +172,23 @@ Os hashes dos zips e o resultado completo do VirusTotal ficam nas notas de cada 
 .\build.ps1
 ```
 
-Gera `bin/` e os pacotes em `release/v1.0.1/` (instalador, portátil e pacote completo, cada zip com este README).
+Gera `bin/` e os pacotes em `release/v1.0.5/` (instalador, portátil e pacote completo, cada zip com este README).
+
+Assinatura Authenticode (opcional, recomendada para distribuição):
+
+```powershell
+$env:NETMONITOR_SIGN_PFX = "C:\caminho\certificado.pfx"
+$env:NETMONITOR_SIGN_PASSWORD = "senha-do-certificado"
+.\build.ps1
+```
+
+O script assina `NetMonitor.exe` e `uninstall.exe` **antes** de embuti-los no instalador e assina o `NetMonitorSetup.exe` no final. Requer `signtool.exe` no PATH.
 
 ---
 
 ## Autor
 
-**Eduardo Noé** — [Noé VFX](https://noevfx.com) · [noevfx.com/scripts](https://noevfx.com/scripts) · [labs@noevfx.com](mailto:labs@noevfx.com)
+**Noé VFX** — [noevfx.com](https://noevfx.com) · [noevfx.com/scripts](https://noevfx.com/scripts) · [labs@noevfx.com](mailto:labs@noevfx.com)
 
 Gostou? Apoie pelo **Pix** na aba *Sobre* do app — chave `a772dce2-7cf6-45db-a699-2102e189b30b` (Noé VFX).
 

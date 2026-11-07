@@ -1,7 +1,7 @@
 ﻿# Teste de ponta a ponta do NetMonitor de desenvolvimento (sem captura de tela):
 #  - confere o hit-test do widget (WindowFromPoint em área "vazia" deve devolver o widget)
 #  - abre as configurações por duplo clique e captura a janela com PrintWindow
-param([string]$Exe = "D:\_Antigravity\NetMonitor\bin\dev\NetMonitor.exe", [string]$Out = "D:\_Antigravity\NetMonitor\bin\shots", [string]$Clicks = "", [string]$Shot2 = "real_settings_after.png")
+param([string]$Exe = "D:\Noe VFX\.Labs\Windows\NetMonitor\bin\dev\NetMonitor.exe", [string]$Out = "D:\Noe VFX\.Labs\Windows\NetMonitor\bin\shots", [string]$Clicks = "", [string]$Shot2 = "real_settings_after.png")
 Add-Type @"
 using System; using System.Text; using System.Collections.Generic; using System.Runtime.InteropServices; using System.Drawing; using System.Drawing.Imaging;
 public static class W {

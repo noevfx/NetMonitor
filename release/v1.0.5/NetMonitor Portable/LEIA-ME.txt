@@ -1,0 +1,24 @@
+﻿==============================================================================
+NetMonitor v1.0.5 - Versão Portátil
+Autor: Noé VFX - https://noevfx.com
+==============================================================================
+
+[PT-BR]
+Esta é a versão portátil oficial do NetMonitor.
+- Não requer instalação nem privilégios de administrador.
+- Pode ser executado diretamente de qualquer pasta ou pendrive.
+- Para usar, basta dar um duplo clique em NetMonitor.exe.
+- Para abrir as Configurações, clique com o botão direito no widget e escolha 'Configurações...'.
+- No primeiro uso, o Windows pode exibir o aviso do SmartScreen por ser um app independente novo,
+  sem assinatura digital. Clique em 'Mais informações' e depois em 'Executar assim mesmo'.
+  Os hashes SHA-256 e os relatórios do VirusTotal estão no README.md.
+
+[EN]
+This is the official portable version of NetMonitor.
+- No installation or administrator privileges required.
+- Can be run directly from any folder or USB drive.
+- To use, simply double-click NetMonitor.exe.
+- To open Settings, right-click the widget and choose 'Configurações... / Settings...'.
+- On first run, Windows SmartScreen may warn about a new, unsigned independent app.
+  Click 'More info' and then 'Run anyway'. SHA-256 hashes and VirusTotal reports are in README.md.
+==============================================================================

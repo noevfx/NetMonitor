@@ -10,6 +10,7 @@ using System.Diagnostics;
 using System.IO;
 using System.Reflection;
 using System.Runtime.InteropServices;
+using System.Text;
 using System.Text.RegularExpressions;
 using System.Windows;
 using System.Windows.Controls;
@@ -92,6 +93,17 @@ namespace NetMonitor.Ui
         TextBlock lblCpu, lblRam, lblRamWin;
         StackPanel appsList;
         TextBlock appsCount;
+        StackPanel pagesHost;
+
+        // Lazy loading, tick enxuto e memória reaproveitada
+        bool railVisible = true;
+        bool sysDarkCache = true;
+        DateTime sysDarkAt = DateTime.MinValue;
+        string appsKey = "";
+        DateTime ramWinAt = DateTime.MinValue;
+        DispatcherTimer changeDebounce;
+        D.Bitmap widgetPreviewBuf, flyoutPreviewBuf;
+        readonly Process selfProc = Process.GetCurrentProcess();
 
         static readonly string[] Pages = { "cores", "layout", "fonte", "setas", "apps", "geral", "sobre" };
 
@@ -113,7 +125,7 @@ namespace NetMonitor.Ui
             TextOptions.SetTextRenderingMode(this, TextRenderingMode.ClearType);
             try { Icon = Res("icone_128.png"); } catch { }
 
-            K.SetTheme(S.IsDark(host.SystemDark()));
+            K.SetTheme(S.IsDark(SysDark()));
             Resources.Add(typeof(System.Windows.Controls.Primitives.ScrollBar), ScrollStyle());
 
             Build();
@@ -132,10 +144,16 @@ namespace NetMonitor.Ui
             DpiChanged += delegate(object s, DpiChangedEventArgs e) { dpi = e.NewDpi.DpiScaleX; previewDirty = true; RefreshPreview(); };
             Closing += delegate
             {
+                if (changeDebounce != null) changeDebounce.Stop();
                 host.Apply(orig, false);   // o que não foi salvo é descartado
                 host.SamplingDemand(false);
             };
-            Closed += delegate { host.SettingsClosed(); };
+            Closed += delegate
+            {
+                if (widgetPreviewBuf != null) { widgetPreviewBuf.Dispose(); widgetPreviewBuf = null; }
+                if (flyoutPreviewBuf != null) { flyoutPreviewBuf.Dispose(); flyoutPreviewBuf = null; }
+                host.SettingsClosed();
+            };
 
             liveTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(500) };
             liveTimer.Tick += delegate { LiveTick(); };
@@ -143,8 +161,13 @@ namespace NetMonitor.Ui
         }
 
         // ------------------------------------------------------------ utilidades
+        static readonly Dictionary<string, BitmapImage> resCache = new Dictionary<string, BitmapImage>();
+
         public static BitmapImage Res(string name)
         {
+            BitmapImage hit;
+            if (resCache.TryGetValue(name, out hit)) return hit;
+
             BitmapImage bi = new BitmapImage();
             using (Stream st = Assembly.GetExecutingAssembly().GetManifestResourceStream(name))
             {
@@ -154,6 +177,7 @@ namespace NetMonitor.Ui
                 bi.EndInit();
             }
             bi.Freeze();
+            resCache[name] = bi;
             return bi;
         }
 
@@ -202,7 +226,21 @@ namespace NetMonitor.Ui
 
         void SizeChanged_()
         {
-            if (railCol != null) railCol.Width = ActualWidth >= 1280 ? new GridLength(424) : new GridLength(0);
+            if (railCol == null) return;
+            bool on = ActualWidth >= 1280;
+            railCol.Width = on ? new GridLength(424) : new GridLength(0);
+            railVisible = on;
+        }
+
+        // Tema do sistema com validade curta: evita abrir o registro várias vezes por segundo.
+        bool SysDark()
+        {
+            if ((DateTime.UtcNow - sysDarkAt).TotalSeconds > 3)
+            {
+                sysDarkCache = host.SystemDark();
+                sysDarkAt = DateTime.UtcNow;
+            }
+            return sysDarkCache;
         }
 
         public void ShowPage(string key)
@@ -215,14 +253,24 @@ namespace NetMonitor.Ui
         // ------------------------------------------------------------ alterações
         void Changed()
         {
-            K.SetTheme(S.IsDark(host.SystemDark()));
-            ApplyChrome();
-            host.Apply(S.Clone(), false);
+            K.SetTheme(S.IsDark(SysDark()));
             ApplyAll();
-            previewDirty = true;
-            RefreshPreview();
-            root.InvalidateVisual();
-            UpdateLayout();
+
+            // Arrastar sliders dispara isto dezenas de vezes por segundo: adia a prévia e o IPC.
+            if (changeDebounce == null)
+            {
+                changeDebounce = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(70) };
+                changeDebounce.Tick += delegate
+                {
+                    changeDebounce.Stop();
+                    ApplyChrome();
+                    host.Apply(S.Clone(), false);
+                    previewDirty = true;
+                    RefreshPreview();
+                };
+            }
+            changeDebounce.Stop();
+            changeDebounce.Start();
         }
 
         void ApplyAll()
@@ -324,7 +372,7 @@ namespace NetMonitor.Ui
             StackPanel links = K.V(8,
                 Link("link-site", "noevfx.com", "https://noevfx.com"),
                 Link("link-scripts", "noevfx.com/scripts", "https://noevfx.com/scripts"),
-                Link("link-repositorio", "github.com/eduardonoe", "https://github.com/eduardonoe"));
+                Link("link-repositorio", "github.com/noevfx", "https://github.com/noevfx"));
             links.Margin = new Thickness(8, 0, 0, 0);
 
             Border foot = new Border { BorderBrush = K.B("line"), BorderThickness = new Thickness(0, 1, 0, 0), Padding = new Thickness(0, 16, 0, 0), Child = K.V(0, vb, links) };
@@ -400,6 +448,7 @@ namespace NetMonitor.Ui
 
         void ApplyPage()
         {
+            EnsurePage(curPage);
             for (int i = 0; i < Titles.Length; i++)
             {
                 string k = Titles[i][0];
@@ -426,6 +475,29 @@ namespace NetMonitor.Ui
             }
         }
 
+        // Constrói uma aba na primeira visita e aplica o estado inicial só dela.
+        void EnsurePage(string k)
+        {
+            if (pages.ContainsKey(k)) return;
+            int before = upd.Count;
+
+            FrameworkElement pg = null;
+            if (k == "cores") pg = PageCores();
+            else if (k == "layout") pg = PageLayout();
+            else if (k == "fonte") pg = PageFonte();
+            else if (k == "setas") pg = PageSetas();
+            else if (k == "apps") pg = PageApps();
+            else if (k == "geral") pg = PageGeral();
+            else if (k == "sobre") pg = PageSobre();
+            if (pg == null) return;
+
+            pg.Visibility = Visibility.Collapsed;
+            pages[k] = pg;
+            pagesHost.Children.Add(pg);
+
+            for (int i = before; i < upd.Count; i++) { try { upd[i](); } catch { } }
+        }
+
         FrameworkElement BuildContent()
         {
             pageTitle = K.T("", 18, FontWeights.Bold, "text");
@@ -433,17 +505,10 @@ namespace NetMonitor.Ui
             StackPanel header = K.V(2, pageTitle, pageSub);
             header.Margin = new Thickness(0, 0, 0, 20);
 
-            pages["cores"] = PageCores();
-            pages["layout"] = PageLayout();
-            pages["fonte"] = PageFonte();
-            pages["setas"] = PageSetas();
-            pages["apps"] = PageApps();
-            pages["geral"] = PageGeral();
-            pages["sobre"] = PageSobre();
-            StackPanel body = new StackPanel();
-            foreach (string k in Pages) body.Children.Add(pages[k]);
+            // As abas são criadas sob demanda (EnsurePage); aqui só existe o contêiner.
+            pagesHost = new StackPanel();
 
-            scroller = new ScrollViewer { VerticalScrollBarVisibility = ScrollBarVisibility.Auto, HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled, Content = new StackPanel { Children = { header, body }, Margin = new Thickness(36, 30, 28, 24) } };
+            scroller = new ScrollViewer { VerticalScrollBarVisibility = ScrollBarVisibility.Auto, HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled, Content = new StackPanel { Children = { header, pagesHost }, Margin = new Thickness(36, 30, 28, 24) } };
 
             Btn reset = new Btn("Restaurar", false, 12, new Thickness(14, 6, 14, 6), "acao-restaurar");
             reset.Click = delegate { ResetDefaults(); };
@@ -548,7 +613,7 @@ namespace NetMonitor.Ui
                     bool on = S.ColorPreset == key && string.IsNullOrEmpty(S.UpCustom) && string.IsNullOrEmpty(S.DownCustom);
                     c.Selected = on;
                     chk.Visibility = on ? Visibility.Visible : Visibility.Hidden;
-                    bool dk = S.IsDark(host.SystemDark());
+                    bool dk = S.IsDark(SysDark());
                     string u = Pal.Resolve(key, true, dk), d = Pal.Resolve(key, false, dk);
                     LinearGradientBrush lg = new LinearGradientBrush(K.C(u), K.C(d), 0);
                     lg.GradientStops.Clear();
@@ -567,7 +632,7 @@ namespace NetMonitor.Ui
             UIElement m2 = Swatch("Taxa de Download (RX)", "seta-rx-fina", false, out sw2, out hx2);
             upd.Add(delegate
             {
-                bool dk = S.IsDark(host.SystemDark());
+                bool dk = S.IsDark(SysDark());
                 sw1.Background = new SolidColorBrush(K.C(S.UpHex(dk))); sw2.Background = new SolidColorBrush(K.C(S.DownHex(dk)));
                 // seta com contraste: preta sobre cor clara, branca sobre cor escura
                 ((Ico)sw1.Child).Tint(new SolidColorBrush(Pal.Luminance(S.UpHex(dk)) > 0.4 ? Colors.Black : Colors.White));
@@ -608,7 +673,7 @@ namespace NetMonitor.Ui
         {
             try
             {
-                bool dk = S.IsDark(host.SystemDark());
+                bool dk = S.IsDark(SysDark());
                 System.Windows.Forms.ColorDialog dlg = new System.Windows.Forms.ColorDialog { FullOpen = true };
                 D.Color cur = D.ColorTranslator.FromHtml(up ? S.UpHex(dk) : S.DownHex(dk));
                 dlg.Color = cur;
@@ -772,7 +837,7 @@ namespace NetMonitor.Ui
             UIElement customRow = K.LR(K.H(8, K.T("Cor Personalizada:", 11, "sub"), customSw, hexIn), opRow);
             upd.Add(delegate
             {
-                bool dk = S.IsDark(host.SystemDark());
+                bool dk = S.IsDark(SysDark());
                 brdSeg.Select(S.BorderEnabled ? 1 : 0, false);
                 for (int i = 0; i < bc.Length; i++) bcSel[i].Selected = S.BorderColorMode == bc[i][0];
                 bcDot[0].Background = new SolidColorBrush(dk ? Colors.White : Colors.Black) { Opacity = 0.35 };
@@ -1034,7 +1099,7 @@ namespace NetMonitor.Ui
             {
                 int sel = -1;
                 for (int i = 0; i < presets.Length; i++) { bool on = S.ArrowPreset == presets[i][0]; sels[i].Selected = on; checks[i].Visibility = on ? Visibility.Visible : Visibility.Hidden; if (on) sel = i; }
-                bool dk = S.IsDark(host.SystemDark());
+                bool dk = S.IsDark(SysDark());
                 lblUp.Foreground = new SolidColorBrush(K.C(S.UpHex(dk))); lblDn.Foreground = new SolidColorBrush(K.C(S.DownHex(dk)));
                 inUp.Box.Foreground = lblUp.Foreground; inDn.Box.Foreground = lblDn.Foreground;
                 if (!inUp.Box.IsKeyboardFocused) inUp.Box.Text = S.CustomUp ?? "";
@@ -1065,8 +1130,9 @@ namespace NetMonitor.Ui
         {
             if (appsList == null) return;
             List<ProcessTrafficItem> items = host.TopApps();
+            appsKey = TopKey(items);
             appsList.Children.Clear();
-            bool dk = S.IsDark(host.SystemDark());
+            bool dk = S.IsDark(SysDark());
             D.Color cu = D.ColorTranslator.FromHtml(S.UpHex(dk)), cd = D.ColorTranslator.FromHtml(S.DownHex(dk));
             Color up = Color.FromRgb(cu.R, cu.G, cu.B), dn = Color.FromRgb(cd.R, cd.G, cd.B);
             int n = items == null ? 0 : Math.Min(5, items.Count);
@@ -1168,7 +1234,7 @@ namespace NetMonitor.Ui
             TextBlock made = K.T("Criado artesanalmente por Noé VFX", 11, "sub");
             TextBlock about = K.Wrap(K.T("Desenvolvido artesanalmente para quem ama precisão, visual perfeitamente integrado ao design nativo do Windows 11 e zero desperdício de recursos. Sem telemetria, sem anúncios e sem dependências pesadas.", 11, "sub"));
             about.LineHeight = 18;
-            StackPanel links = K.H(10, SiteLink("link-site", "noevfx.com", "https://noevfx.com"), SiteLink("link-scripts", "noevfx.com/scripts", "https://noevfx.com/scripts"), SiteLink("link-repositorio", "github.com/eduardonoe", "https://github.com/eduardonoe"));
+            StackPanel links = K.H(10, SiteLink("link-site", "noevfx.com", "https://noevfx.com"), SiteLink("link-scripts", "noevfx.com/scripts", "https://noevfx.com/scripts"), SiteLink("link-repositorio", "github.com/noevfx", "https://github.com/noevfx"));
             Border c1 = new Border { Background = K.B("card"), CornerRadius = new CornerRadius(12), Padding = new Thickness(20), Margin = new Thickness(0, 0, 0, 20), Child = K.V(14, K.H(14, logo, K.V(2, K.H(10, K.Bold("NetMonitor for Windows 11", 16), ver), made)), about, links) };
 
             // café + PIX
@@ -1345,7 +1411,17 @@ namespace NetMonitor.Ui
 
         bool previewDirty = true;
         string previewKey = "";
-        List<ProcessTrafficItem> previewTop;
+
+        // Impressão digital do Top 5: a lista troca de referência a cada envio, então não serve comparar referências.
+        static string TopKey(List<ProcessTrafficItem> l)
+        {
+            if (l == null) return "";
+            StringBuilder sb = new StringBuilder();
+            int n = Math.Min(5, l.Count);
+            for (int i = 0; i < n; i++)
+                sb.Append(l[i].Name).Append('|').Append(l[i].TxBytes).Append('|').Append(l[i].RxBytes).Append(';');
+            return sb.ToString();
+        }
 
         // Redesenha a prévia só quando os valores exibidos, a lista de apps ou as configurações mudaram
         void RefreshPreview()
@@ -1354,17 +1430,23 @@ namespace NetMonitor.Ui
             try
             {
                 double dd = Math.Max(1.0, dpi) * 96.0;
-                bool dk = S.IsDark(host.SystemDark());
+                bool dk = S.IsDark(SysDark());
                 double ub, db; host.LiveBits(out ub, out db);
                 string un, uu, dn, du;
                 SpeedFmt.Format(S, ub, true, out un, out uu);
                 SpeedFmt.Format(S, db, false, out dn, out du);
-                string key = un + uu + dn + du + dd;
-                List<ProcessTrafficItem> top = host.TopApps();
-                if (!previewDirty && key == previewKey && ReferenceEquals(top, previewTop)) return;
-                previewDirty = false; previewKey = key; previewTop = top;
-                using (D.Bitmap bmp = WidgetRenderer.Render(S, dk, un, uu, dn, du, (float)dd))
-                    imgWidget.Source = ToSource(bmp, dd);
+                string key = un + uu + dn + du + dd + TopKey(host.TopApps());
+                if (!previewDirty && key == previewKey) return;
+                previewDirty = false; previewKey = key;
+
+                D.Bitmap wb = WidgetRenderer.RenderTo(widgetPreviewBuf, S, dk, un, uu, dn, du, (float)dd);
+                if (!ReferenceEquals(wb, widgetPreviewBuf))
+                {
+                    if (widgetPreviewBuf != null) widgetPreviewBuf.Dispose();
+                    widgetPreviewBuf = wb;
+                }
+                imgWidget.Source = ToSource(widgetPreviewBuf, dd);
+
                 RenderFlyout();
                 UpdateFlyoutOpen();
             }
@@ -1376,20 +1458,23 @@ namespace NetMonitor.Ui
             try
             {
                 double dd = Math.Max(1.0, dpi) * 96.0;
-                bool dk = S.IsDark(host.SystemDark());
+                bool dk = S.IsDark(SysDark());
                 double ub, db; host.LiveBits(out ub, out db);
                 FlyoutHit hit;
-                using (D.Bitmap bmp = FlyoutRenderer.Render(S, dk, host.TopApps(), ub, db, (float)dd, hoverRow, 0, out hit))
+                D.Bitmap fb = FlyoutRenderer.RenderTo(flyoutPreviewBuf, S, dk, host.TopApps(), ub, db, (float)dd, hoverRow, 0, out hit);
+                if (!ReferenceEquals(fb, flyoutPreviewBuf))
                 {
-                    lastHit = hit;
-                    imgFlyout.Source = ToSource(bmp, dd);
-                    double wDip = bmp.Width * 96.0 / dd, hDip = bmp.Height * 96.0 / dd;
-                    flyoutScale = Math.Min(1.0, 368.0 / wDip);
-                    imgFlyout.Stretch = Stretch.Fill;
-                    imgFlyout.Width = wDip * flyoutScale; imgFlyout.Height = hDip * flyoutScale;
-                    flyoutHeight = hDip * flyoutScale;
-                    flyoutWrap.Height = flyoutHeight;
+                    if (flyoutPreviewBuf != null) flyoutPreviewBuf.Dispose();
+                    flyoutPreviewBuf = fb;
                 }
+                lastHit = hit;
+                imgFlyout.Source = ToSource(flyoutPreviewBuf, dd);
+                double wDip = flyoutPreviewBuf.Width * 96.0 / dd, hDip = flyoutPreviewBuf.Height * 96.0 / dd;
+                flyoutScale = Math.Min(1.0, 368.0 / wDip);
+                imgFlyout.Stretch = Stretch.Fill;
+                imgFlyout.Width = wDip * flyoutScale; imgFlyout.Height = hDip * flyoutScale;
+                flyoutHeight = hDip * flyoutScale;
+                flyoutWrap.Height = flyoutHeight;
             }
             catch (Exception ex) { K.Log(ex); }
         }
@@ -1428,13 +1513,26 @@ namespace NetMonitor.Ui
         {
             try
             {
-                if (S.IsDark(host.SystemDark()) != K.Dark) { Changed(); return; }   // o Windows trocou o tema: repinta tudo agora
-                RefreshPreview();
+                if (S.IsDark(SysDark()) != K.Dark) { Changed(); return; }   // o Windows trocou o tema: repinta tudo agora
+
+                if (railVisible) RefreshPreview();   // barra lateral oculta: não gasta desenho
+
                 double cpu, ram; host.PerfInfo(out cpu, out ram);
                 lblCpu.Text = cpu.ToString("0.0") + "%";
                 lblRam.Text = ram.ToString("0.0") + " MB";
-                lblRamWin.Text = (Process.GetCurrentProcess().WorkingSet64 / 1048576.0).ToString("0") + " MB";
-                if (curPage == "apps") RebuildApps();
+
+                if ((DateTime.UtcNow - ramWinAt).TotalSeconds > 2)
+                {
+                    ramWinAt = DateTime.UtcNow;
+                    selfProc.Refresh();
+                    lblRamWin.Text = (selfProc.WorkingSet64 / 1048576.0).ToString("0") + " MB";
+                }
+
+                if (curPage == "apps")
+                {
+                    string k = TopKey(host.TopApps());
+                    if (k != appsKey) { appsKey = k; RebuildApps(); }
+                }
             }
             catch (Exception ex) { K.Log(ex); }
         }

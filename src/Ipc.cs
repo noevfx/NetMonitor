@@ -34,19 +34,34 @@ namespace NetMonitor
         [DllImport("user32.dll")] public static extern bool IsWindow(IntPtr hWnd);
         [DllImport("user32.dll")] public static extern bool AllowSetForegroundWindow(int pid);
 
+        // Buffer nativo reaproveitado (as mensagens saem sempre do mesmo processo/thread de UI).
+        static readonly object sendLock = new object();
+        static IntPtr sendBuf;
+        static int sendCap;
+
         // Envia sem travar quem envia: desiste se o destino não responder em 300 ms
         public static bool Send(IntPtr to, int code, string text, IntPtr from)
         {
             if (to == IntPtr.Zero) return false;
             if (text == null) text = "";
-            IntPtr mem = Marshal.StringToHGlobalUni(text);
-            try
+
+            lock (sendLock)
             {
-                COPYDATASTRUCT cds = new COPYDATASTRUCT { dwData = (IntPtr)code, cbData = (text.Length + 1) * 2, lpData = mem };
+                int bytes = (text.Length + 1) * 2;
+                if (bytes > sendCap)
+                {
+                    if (sendBuf != IntPtr.Zero) Marshal.FreeHGlobal(sendBuf);
+                    sendBuf = Marshal.AllocHGlobal(bytes);
+                    sendCap = bytes;
+                }
+
+                if (text.Length > 0) Marshal.Copy(text.ToCharArray(), 0, sendBuf, text.Length);
+                Marshal.WriteInt16(sendBuf, text.Length * 2, 0);
+
+                COPYDATASTRUCT cds = new COPYDATASTRUCT { dwData = (IntPtr)code, cbData = bytes, lpData = sendBuf };
                 IntPtr res;
                 return SendMessageTimeout(to, WM_COPYDATA, from, ref cds, 0x0002 /* SMTO_ABORTIFHUNG */, 300, out res) != IntPtr.Zero;
             }
-            finally { Marshal.FreeHGlobal(mem); }
         }
 
         public static bool Read(IntPtr lParam, out int code, out string text)

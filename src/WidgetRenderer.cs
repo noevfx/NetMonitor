@@ -33,29 +33,130 @@ namespace NetMonitor
             return installed.Contains(family);
         }
 
+        static readonly Dictionary<string, Color> hexCache = new Dictionary<string, Color>();
+
         public static Color Hex(string hex, int alpha)
         {
+            string key = hex + "|" + alpha;
+            Color c;
+            if (hexCache.TryGetValue(key, out c)) return c;
             try
             {
-                Color c = ColorTranslator.FromHtml(hex);
-                return Color.FromArgb(alpha, c.R, c.G, c.B);
+                Color b = ColorTranslator.FromHtml(hex);
+                c = Color.FromArgb(alpha, b.R, b.G, b.B);
             }
-            catch { return Color.FromArgb(alpha, 255, 255, 255); }
+            catch { c = Color.FromArgb(alpha, 255, 255, 255); }
+            hexCache[key] = c;
+            return c;
         }
 
         [ThreadStatic] static Dictionary<string, Font> fontCache;
 
-        // Fonte reaproveitada entre renderizações (cache por thread: o widget e a prévia desenham em threads diferentes)
+        // Fonte reaproveitada entre renderizações (cache por thread: o widget e a prévia desenham em threads diferentes).
+        // Nunca descarta fontes em uso: acima do limite devolve uma instância avulsa (o GC finaliza).
         static Font CachedFont(string family, float pt, FontStyle style)
         {
             if (fontCache == null) fontCache = new Dictionary<string, Font>();
             string key = family + "|" + pt.ToString("0.00") + "|" + (int)style;
             Font f;
             if (fontCache.TryGetValue(key, out f)) return f;
-            if (fontCache.Count > 24) { foreach (Font old in fontCache.Values) old.Dispose(); fontCache.Clear(); }
+            if (fontCache.Count >= 256) return MakeFont(family, pt, style);
             f = MakeFont(family, pt, style);
             fontCache[key] = f;
             return f;
+        }
+
+        [ThreadStatic] static StringFormat typo;
+
+        static StringFormat Typo()
+        {
+            if (typo == null)
+            {
+                typo = (StringFormat)StringFormat.GenericTypographic.Clone();
+                typo.FormatFlags |= StringFormatFlags.NoWrap | StringFormatFlags.NoClip;
+            }
+            return typo;
+        }
+
+        [ThreadStatic] static Bitmap probeBmp;
+        [ThreadStatic] static Graphics probeG;
+        [ThreadStatic] static float probeDpi;
+
+        // Medição usa um bitmap/Graphics fixos em vez de criar um novo por render.
+        static Graphics Probe(float dpi)
+        {
+            if (probeG == null || Math.Abs(probeDpi - dpi) > 0.01f)
+            {
+                if (probeG != null) { probeG.Dispose(); probeG = null; }
+                if (probeBmp != null) { probeBmp.Dispose(); probeBmp = null; }
+                probeBmp = new Bitmap(1, 1, PixelFormat.Format32bppPArgb);
+                probeBmp.SetResolution(dpi, dpi);
+                probeG = Graphics.FromImage(probeBmp);
+                probeG.TextRenderingHint = TextRenderingHint.AntiAlias;
+                probeDpi = dpi;
+            }
+            return probeG;
+        }
+
+        // Métricas de layout dependem só de fonte/DPI/configuração: medir uma vez e reaproveitar.
+        class Metrics
+        {
+            public float WNum, WUnit, LineH, PxNum, AscNum, AscUnit, WArrow, ArrowBox;
+            public bool TextArrow, ShowArrow;
+            public Font FNum, FUnit, FGlyph, FWord, FArrow;
+        }
+
+        [ThreadStatic] static Dictionary<string, Metrics> metricsCache;
+
+        static Metrics GetMetrics(AppSettings s, float dpi, string family, string numFamily, float pt, FontStyle style)
+        {
+            string upG = s.UpGlyph(), dnG = s.DownGlyph();
+            bool textArrow = (s.ArrowPreset == "text" || s.ArrowPreset == "custom");
+            bool showArrow = s.ArrowPosition != "none" && (!textArrow || upG.Length > 0 || dnG.Length > 0);
+            float arrowScale = (float)Math.Max(0.6, Math.Min(1.6, s.ArrowScale));
+
+            string key = numFamily + "|" + family + "|" + pt.ToString("0.##") + "|" + (int)style + "|" +
+                         dpi.ToString("0.##") + "|" + s.ShowUnit + "|" + s.ArrowPreset + "|" +
+                         arrowScale.ToString("0.##") + "|" + s.ArrowPosition + "|" + upG + "|" + dnG;
+
+            if (metricsCache == null) metricsCache = new Dictionary<string, Metrics>();
+            Metrics m;
+            if (metricsCache.TryGetValue(key, out m)) return m;
+
+            m = new Metrics();
+            m.TextArrow = textArrow;
+            m.ShowArrow = showArrow;
+            m.FNum = CachedFont(numFamily, pt, style);
+            m.FUnit = CachedFont(family, Math.Max(6.5f, pt * 0.84f), FontStyle.Regular);
+            m.FGlyph = CachedFont("Segoe UI Symbol", Math.Max(6.5f, pt * 0.8f * arrowScale), FontStyle.Regular);
+            m.FWord = CachedFont(family, Math.Max(6.5f, pt * 0.8f * arrowScale), FontStyle.Bold);
+            m.FArrow = (upG.Length <= 1 && dnG.Length <= 1) ? m.FGlyph : m.FWord;
+
+            StringFormat tf = Typo();
+            Graphics g = Probe(dpi);
+            m.PxNum = pt * dpi / 72f;
+            m.AscNum = AscentPx(m.FNum, dpi);
+            m.AscUnit = AscentPx(m.FUnit, dpi);
+            m.WNum = (float)Math.Ceiling(g.MeasureString("888.8", m.FNum, PointF.Empty, tf).Width);
+            float wUnit = 0;
+            string[] us = new string[] { "Mbps", "Gbps", "Kbps", "MB/s", "GB/s", "KB/s" };
+            for (int i = 0; i < us.Length; i++) wUnit = Math.Max(wUnit, g.MeasureString(us[i], m.FUnit, PointF.Empty, tf).Width);
+            m.WUnit = s.ShowUnit ? (float)Math.Ceiling(wUnit) : 0;
+            m.LineH = m.FNum.GetHeight(g);
+
+            m.ArrowBox = m.PxNum * 0.95f * arrowScale * ((s.ArrowPreset == "triangles" || s.ArrowPreset == "outline") ? 1.188f : 1f);
+            if (showArrow)
+            {
+                if (textArrow)
+                    m.WArrow = (float)Math.Ceiling(Math.Max(
+                        g.MeasureString(upG, m.FArrow, PointF.Empty, tf).Width,
+                        g.MeasureString(dnG, m.FArrow, PointF.Empty, tf).Width));
+                else m.WArrow = (float)Math.Ceiling(m.ArrowBox);
+            }
+
+            if (metricsCache.Count >= 128) metricsCache.Clear();
+            metricsCache[key] = m;
+            return m;
         }
 
         static Font MakeFont(string family, float pt, FontStyle style)
@@ -92,6 +193,12 @@ namespace NetMonitor
 
         public static Bitmap Render(AppSettings s, bool dark, string upNum, string upUnit, string dnNum, string dnUnit, float dpi)
         {
+            return RenderTo(null, s, dark, upNum, upUnit, dnNum, dnUnit, dpi);
+        }
+
+        // reuse: bitmap devolvido por uma chamada anterior; reaproveitado se o tamanho bater.
+        public static Bitmap RenderTo(Bitmap reuse, AppSettings s, bool dark, string upNum, string upUnit, string dnNum, string dnUnit, float dpi)
+        {
             float sc = dpi / 96f;
 
             string family = s.FontFamily;
@@ -106,138 +213,97 @@ namespace NetMonitor
             }
             float pt = (float)s.FontSize;
 
-            using (Bitmap probe = new Bitmap(1, 1, PixelFormat.Format32bppPArgb))
+            Metrics m = GetMetrics(s, dpi, family, numFamily, pt, style);
+            Font fNum = m.FNum, fUnit = m.FUnit, fArrow = m.FArrow;
+            StringFormat tf = Typo();
+            float lineH = m.LineH, wNum = m.WNum, wUnit = m.WUnit, arrowBox = m.ArrowBox;
+            float ascNum = m.AscNum, ascUnit = m.AscUnit, wArrow = m.WArrow;
+            bool textArrow = m.TextArrow, showArrow = m.ShowArrow;
+            string upG = s.UpGlyph(), dnG = s.DownGlyph();
+
+            bool boxed = s.BorderEnabled || s.BgMode != "transparent";
+            float pad = (boxed ? 9 : 7) * sc, gap = 6 * sc, between = 16 * sc, vpad = (boxed ? 4 : 3) * sc;
+            float pitch = lineH * 0.9f;          // distância entre as duas linhas (mais junta que a altura da fonte)
+            bool up1 = s.MetricsOrder != "down-first";
+            Row rUp = new Row { Num = upNum, Unit = upUnit, Hex = s.UpHex(dark), Up = true };
+            Row rDn = new Row { Num = dnNum, Unit = dnUnit, Hex = s.DownHex(dark), Up = false };
+            Row first = up1 ? rUp : rDn, second = up1 ? rDn : rUp;
+
+            bool two = s.Layout != "one-line";
+            float groupW = (showArrow ? wArrow + gap : 0) + wNum + (s.ShowUnit ? gap + wUnit : 0);
+            int W, H;
+            if (two)
             {
-                Font fNum = CachedFont(numFamily, pt, style);
-                Font fUnit = CachedFont(family, Math.Max(6.5f, pt * 0.84f), FontStyle.Regular);
-                Font fGlyph = CachedFont("Segoe UI Symbol", Math.Max(6.5f, pt * 0.8f * (float)Math.Max(0.6, Math.Min(1.6, s.ArrowScale))), FontStyle.Regular);
-                Font fWord = CachedFont(family, Math.Max(6.5f, pt * 0.8f * (float)Math.Max(0.6, Math.Min(1.6, s.ArrowScale))), FontStyle.Bold);
-                probe.SetResolution(dpi, dpi);
-                StringFormat tf = StringFormat.GenericTypographic;
-                float pxNum = pt * dpi / 72f;
+                W = (int)Math.Ceiling(pad * 2 + groupW);
+                H = (int)Math.Ceiling(Math.Max(34 * sc, lineH + pitch + vpad * 2));
+            }
+            else
+            {
+                W = (int)Math.Ceiling(pad * 2 + groupW * 2 + between);
+                H = (int)Math.Ceiling(Math.Max(26 * sc, lineH + vpad * 2 + 4 * sc));
+            }
 
-                float wNum, wUnit, lineH;
-                float ascNum = AscentPx(fNum, dpi);
-                float ascUnit = AscentPx(fUnit, dpi);
-                using (Graphics m = Graphics.FromImage(probe))
+            Bitmap bmp = (reuse != null && reuse.Width == W && reuse.Height == H)
+                ? reuse
+                : new Bitmap(W, H, PixelFormat.Format32bppPArgb);
+            if (!ReferenceEquals(bmp, reuse)) bmp.SetResolution(dpi, dpi);
+            using (Graphics g = Graphics.FromImage(bmp))
+            {
+                g.Clear(Color.Transparent);
+                g.SmoothingMode = SmoothingMode.AntiAlias;
+                g.PixelOffsetMode = PixelOffsetMode.Half;
+                g.TextRenderingHint = TextRenderingHint.AntiAlias;
+
+                // Fundo: transparente recebe alpha 1 para o Windows entregar cliques (hit-test) em toda a área
+                RectangleF full = new RectangleF(0, 0, W, H);
+                float rad = 8 * sc;
+                if (s.BgMode == "solid")
                 {
-                    m.TextRenderingHint = TextRenderingHint.AntiAlias;
-                    wNum = m.MeasureString("888.8", fNum, PointF.Empty, tf).Width;
-                    wUnit = 0;
-                    string[] us = new string[] { "Mbps", "Gbps", "Kbps", "MB/s", "GB/s", "KB/s" };
-                    for (int i = 0; i < us.Length; i++) wUnit = Math.Max(wUnit, m.MeasureString(us[i], fUnit, PointF.Empty, tf).Width);
-                    lineH = fNum.GetHeight(m);
+                    using (GraphicsPath p = RoundRect(full, rad))
+                    using (SolidBrush b = new SolidBrush(Hex(Pal.For(dark).WidgetBg, 255)))
+                        g.FillPath(b, p);
                 }
-                wNum = (float)Math.Ceiling(wNum);
-                wUnit = s.ShowUnit ? (float)Math.Ceiling(wUnit) : 0;
-
-                // Setas: vetor (4 presets) ou texto (TX:/RX: e personalizado)
-                string upG = s.UpGlyph(), dnG = s.DownGlyph();
-                bool textArrow = (s.ArrowPreset == "text" || s.ArrowPreset == "custom");
-                bool showArrow = s.ArrowPosition != "none" && (!textArrow || upG.Length > 0 || dnG.Length > 0);
-                float arrowScale = (float)Math.Max(0.6, Math.Min(1.6, s.ArrowScale));
-                // triângulos (sólido e vazado) são visualmente menores: +10% e mais +8%
-                float arrowBox = pxNum * 0.95f * arrowScale * ((s.ArrowPreset == "triangles" || s.ArrowPreset == "outline") ? 1.188f : 1f);
-                float wArrow = 0;
-                Font fArrow = null;
-                if (showArrow)
+                else if (s.BgMode == "acrylic")
                 {
-                    if (textArrow)
-                    {
-                        fArrow = (upG.Length <= 1 && dnG.Length <= 1) ? fGlyph : fWord;
-                        using (Graphics m = Graphics.FromImage(probe))
-                        {
-                            m.TextRenderingHint = TextRenderingHint.AntiAlias;
-                            wArrow = Math.Max(m.MeasureString(upG, fArrow, PointF.Empty, tf).Width, m.MeasureString(dnG, fArrow, PointF.Empty, tf).Width);
-                        }
-                        wArrow = (float)Math.Ceiling(wArrow);
-                    }
-                    else wArrow = (float)Math.Ceiling(arrowBox);
-                }
-
-                bool boxed = s.BorderEnabled || s.BgMode != "transparent";
-                float pad = (boxed ? 9 : 7) * sc, gap = 6 * sc, between = 16 * sc, vpad = (boxed ? 4 : 3) * sc;
-                float pitch = lineH * 0.9f;          // distância entre as duas linhas (mais junta que a altura da fonte)
-                bool up1 = s.MetricsOrder != "down-first";
-                Row rUp = new Row { Num = upNum, Unit = upUnit, Hex = s.UpHex(dark), Up = true };
-                Row rDn = new Row { Num = dnNum, Unit = dnUnit, Hex = s.DownHex(dark), Up = false };
-                Row first = up1 ? rUp : rDn, second = up1 ? rDn : rUp;
-
-                bool two = s.Layout != "one-line";
-                float groupW = (showArrow ? wArrow + gap : 0) + wNum + (s.ShowUnit ? gap + wUnit : 0);
-                int W, H;
-                if (two)
-                {
-                    W = (int)Math.Ceiling(pad * 2 + groupW);
-                    H = (int)Math.Ceiling(Math.Max(34 * sc, lineH + pitch + vpad * 2));
+                    using (GraphicsPath p = RoundRect(full, rad))
+                    using (SolidBrush b = new SolidBrush(Color.FromArgb(dark ? 22 : 166, 255, 255, 255)))
+                        g.FillPath(b, p);
                 }
                 else
                 {
-                    W = (int)Math.Ceiling(pad * 2 + groupW * 2 + between);
-                    H = (int)Math.Ceiling(Math.Max(26 * sc, lineH + vpad * 2 + 4 * sc));
+                    using (SolidBrush b = new SolidBrush(Color.FromArgb(1, 0, 0, 0)))
+                        g.FillRectangle(b, 0, 0, W, H);
                 }
 
-                Bitmap bmp = new Bitmap(W, H, PixelFormat.Format32bppPArgb);
-                bmp.SetResolution(dpi, dpi);
-                using (Graphics g = Graphics.FromImage(bmp))
+                if (two)
                 {
-                    g.Clear(Color.Transparent);
-                    g.SmoothingMode = SmoothingMode.AntiAlias;
-                    g.PixelOffsetMode = PixelOffsetMode.Half;
-                    g.TextRenderingHint = TextRenderingHint.AntiAlias;
-
-                    // Fundo: transparente recebe alpha 1 para o Windows entregar cliques (hit-test) em toda a área
-                    RectangleF full = new RectangleF(0, 0, W, H);
-                    float rad = 8 * sc;
-                    if (s.BgMode == "solid")
-                    {
-                        using (GraphicsPath p = RoundRect(full, rad))
-                        using (SolidBrush b = new SolidBrush(Hex(Pal.For(dark).WidgetBg, 255)))
-                            g.FillPath(b, p);
-                    }
-                    else if (s.BgMode == "acrylic")
-                    {
-                        using (GraphicsPath p = RoundRect(full, rad))
-                        using (SolidBrush b = new SolidBrush(Color.FromArgb(dark ? 22 : 166, 255, 255, 255)))
-                            g.FillPath(b, p);
-                    }
-                    else
-                    {
-                        using (SolidBrush b = new SolidBrush(Color.FromArgb(1, 0, 0, 0)))
-                            g.FillRectangle(b, 0, 0, W, H);
-                    }
-
-                    if (two)
-                    {
-                        float top0 = (H - (lineH + pitch)) / 2f;
-                        DrawGroup(g, s, first, top0, lineH, pad, groupW, showArrow, textArrow, wArrow, arrowBox, wNum, wUnit, gap, fNum, fUnit, fArrow, ascNum, ascUnit, lineH, dpi, upG, dnG);
-                        DrawGroup(g, s, second, top0 + pitch, lineH, pad, groupW, showArrow, textArrow, wArrow, arrowBox, wNum, wUnit, gap, fNum, fUnit, fArrow, ascNum, ascUnit, lineH, dpi, upG, dnG);
-                    }
-                    else
-                    {
-                        DrawGroup(g, s, first, 0, H, pad, groupW, showArrow, textArrow, wArrow, arrowBox, wNum, wUnit, gap, fNum, fUnit, fArrow, ascNum, ascUnit, lineH, dpi, upG, dnG);
-                        DrawGroup(g, s, second, 0, H, pad + groupW + between, groupW, showArrow, textArrow, wArrow, arrowBox, wNum, wUnit, gap, fNum, fUnit, fArrow, ascNum, ascUnit, lineH, dpi, upG, dnG);
-                    }
-
-                    if (s.BorderEnabled)
-                    {
-                        float bw = Math.Max(1.5f, 1.5f * sc);   // traço um pouco mais grosso e suavizado: sem aspecto serrilhado
-                        RectangleF br = new RectangleF(bw / 2f, bw / 2f, W - bw, H - bw);
-                        using (GraphicsPath p = RoundRect(br, rad - bw / 2f))
-                        using (Pen pen = new Pen(Hex(s.BorderHex(dark), (int)Math.Round(255 * Math.Max(0, Math.Min(1, s.BorderOpacity)))), bw))
-                            g.DrawPath(pen, p);
-                    }
+                    float top0 = (H - (lineH + pitch)) / 2f;
+                    DrawGroup(g, s, first, top0, lineH, pad, groupW, showArrow, textArrow, wArrow, arrowBox, wNum, wUnit, gap, fNum, fUnit, fArrow, ascNum, ascUnit, lineH, dpi, upG, dnG);
+                    DrawGroup(g, s, second, top0 + pitch, lineH, pad, groupW, showArrow, textArrow, wArrow, arrowBox, wNum, wUnit, gap, fNum, fUnit, fArrow, ascNum, ascUnit, lineH, dpi, upG, dnG);
                 }
-                return bmp;
+                else
+                {
+                    DrawGroup(g, s, first, 0, H, pad, groupW, showArrow, textArrow, wArrow, arrowBox, wNum, wUnit, gap, fNum, fUnit, fArrow, ascNum, ascUnit, lineH, dpi, upG, dnG);
+                    DrawGroup(g, s, second, 0, H, pad + groupW + between, groupW, showArrow, textArrow, wArrow, arrowBox, wNum, wUnit, gap, fNum, fUnit, fArrow, ascNum, ascUnit, lineH, dpi, upG, dnG);
+                }
+
+                if (s.BorderEnabled)
+                {
+                    float bw = Math.Max(1.5f, 1.5f * sc);   // traço um pouco mais grosso e suavizado: sem aspecto serrilhado
+                    RectangleF br = new RectangleF(bw / 2f, bw / 2f, W - bw, H - bw);
+                    using (GraphicsPath p = RoundRect(br, rad - bw / 2f))
+                    using (Pen pen = new Pen(Hex(s.BorderHex(dark), (int)Math.Round(255 * Math.Max(0, Math.Min(1, s.BorderOpacity)))), bw))
+                        g.DrawPath(pen, p);
+                }
             }
+            return bmp;
         }
 
         static void DrawGroup(Graphics g, AppSettings s, Row r, float top, float rowH, float x0, float groupW,
             bool showArrow, bool textArrow, float wArrow, float arrowBox, float wNum, float wUnit, float gap,
             Font fNum, Font fUnit, Font fArrow, float ascNum, float ascUnit, float lineH, float dpi, string upG, string dnG)
         {
-            StringFormat tf = StringFormat.GenericTypographic;
-            tf.FormatFlags |= StringFormatFlags.NoWrap | StringFormatFlags.NoClip;
+            StringFormat tf = Typo();
 
             float yNum = top + (rowH - lineH) / 2f;
             float baseline = yNum + ascNum;

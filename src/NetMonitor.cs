@@ -1,6 +1,6 @@
-﻿// ==============================================================================
+// ==============================================================================
 // NetMonitor - Monitor de Rede Ultraleve para Barra de Tarefas (Windows 11)
-// Autor: Eduardo Noé (eduardonoe)
+// Autor: Noé VFX (noevfx)
 //
 // Arquitetura:
 // - Widget e flyout: janelas "layered" (UpdateLayeredWindow) desenhadas em GDI+ por WidgetRenderer/FlyoutRenderer.
@@ -28,9 +28,9 @@ using Timer = System.Windows.Forms.Timer;
 
 [assembly: AssemblyTitle("NetMonitor")]
 [assembly: AssemblyDescription("Monitor de Rede Ultraleve para Barra de Tarefas do Windows 11")]
-[assembly: AssemblyCompany("Eduardo Noé")]
+[assembly: AssemblyCompany("Noé VFX")]
 [assembly: AssemblyProduct("NetMonitor")]
-[assembly: AssemblyCopyright("Copyright © 2026 Eduardo Noé")]
+[assembly: AssemblyCopyright("Copyright © 2026 Noé VFX")]
 // AssemblyVersion/AssemblyFileVersion vêm de src/Version.g.cs (gerado a partir de version.txt)
 
 namespace NetMonitor
@@ -266,7 +266,12 @@ namespace NetMonitor
         private double liveUpBits = 0, liveDownBits = 0;
         private double physRxBytes = 0, physTxBytes = 0;
         private string lastRenderKey = "";
+        private string upNum = "0", upUnit = "bps", dnNum = "0", dnUnit = "bps";
         private int curW = 106, curH = 38;
+        private Bitmap widgetBmp;
+        private int widgetVersion;
+        private float dpiCache = 0f;
+        private readonly Process self = Process.GetCurrentProcess();
 
         // Componentes UI
         private ContextMenuStrip contextMenu;
@@ -278,10 +283,14 @@ namespace NetMonitor
         private Timer processSampleTimer;
         private volatile bool isHoverSampling = false;
         private static volatile bool filterLoopback = true;
-        private struct IoSnap { public ulong R, W; }
+        private struct IoSnap { public ulong R, W, O; }
         private Dictionary<int, IoSnap> lastProcessIo = new Dictionary<int, IoSnap>();
         private Dictionary<int, string> cachedProcessNames = new Dictionary<int, string>();
+        private Dictionary<int, string> cachedUnified = new Dictionary<int, string>();
         private Dictionary<string, string> subCache = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        private struct AppAcc { public ulong Tx, Rx; public int Pid; }
+        private readonly Dictionary<string, AppAcc> appAcc = new Dictionary<string, AppAcc>(StringComparer.OrdinalIgnoreCase);
+        private readonly List<int> stalePids = new List<int>();
         private DateTime lastSampleAt = DateTime.MinValue;
         private readonly object topLock = new object();
         private List<ProcessTrafficItem> latestTop = new List<ProcessTrafficItem>();
@@ -289,6 +298,13 @@ namespace NetMonitor
         // Estado de tela
         private bool isSessionLocked = false;
         private bool isScreensaverRunning = false;
+        private IntPtr lastForeground = IntPtr.Zero;
+        private bool fullscreenCache;
+        private DateTime fullscreenAt = DateTime.MinValue;
+
+        // Buffers reutilizados pela amostragem e pela conversa com as Configurações
+        private readonly StringBuilder dataSb = new StringBuilder(256);
+        private bool menuDirty = true;
 
         // Consumo do próprio app (painel de configurações)
         private TimeSpan lastCpu = TimeSpan.Zero;
@@ -335,8 +351,10 @@ namespace NetMonitor
 
         private float GetDpi()
         {
-            try { using (Graphics g = this.CreateGraphics()) return g.DpiX; }
-            catch { return 96f; }
+            if (dpiCache > 0f) return dpiCache;
+            try { using (Graphics g = this.CreateGraphics()) dpiCache = g.DpiX; }
+            catch { dpiCache = 96f; }
+            return dpiCache;
         }
 
         private void OnSessionSwitch(object sender, SessionSwitchEventArgs e)
@@ -395,6 +413,7 @@ namespace NetMonitor
         {
             try
             {
+                Pal.ClearCache();
                 lastSystemDark = IsWindowsDarkTheme();
                 RenderWidget();
                 if (flyout != null && flyout.Visible) UpdateFlyout();
@@ -451,17 +470,30 @@ namespace NetMonitor
         }
 
         // ------------------------------------------------------------------ desenho
+        // Formata as velocidades uma única vez; o desenho e a chave de "mudou" reaproveitam.
+        private void UpdateFormattedSpeeds()
+        {
+            SpeedFmt.Format(S, liveUpBits, true, out upNum, out upUnit);
+            SpeedFmt.Format(S, liveDownBits, false, out dnNum, out dnUnit);
+        }
+
+        // Bitmap do widget reaproveitado entre redesenhos (sem alocar por frame).
         private Bitmap MakeBitmap()
         {
-            string un, uu, dn, du;
-            SpeedFmt.Format(S, liveUpBits, true, out un, out uu);
-            SpeedFmt.Format(S, liveDownBits, false, out dn, out du);
-            return WidgetRenderer.Render(S, EffectiveDark, un, uu, dn, du, GetDpi());
+            Bitmap nb = WidgetRenderer.RenderTo(widgetBmp, S, EffectiveDark, upNum, upUnit, dnNum, dnUnit, GetDpi());
+            if (!ReferenceEquals(nb, widgetBmp))
+            {
+                if (widgetBmp != null) widgetBmp.Dispose();
+                widgetBmp = nb;
+            }
+            return widgetBmp;
         }
 
         private void MeasureWidget()
         {
-            using (Bitmap b = MakeBitmap()) { curW = b.Width; curH = b.Height; }
+            UpdateFormattedSpeeds();
+            Bitmap b = MakeBitmap();
+            curW = b.Width; curH = b.Height;
         }
 
         // Redesenha o widget. Se o tamanho mudou, mantém a borda direita e o centro vertical no lugar.
@@ -470,19 +502,18 @@ namespace NetMonitor
             if (!this.IsHandleCreated) return;
             try
             {
-                using (Bitmap bmp = MakeBitmap())
+                UpdateFormattedSpeeds();
+                Bitmap bmp = MakeBitmap();
+                int x = this.Left, y = this.Top;
+                if (bmp.Width != curW || bmp.Height != curH)
                 {
-                    int x = this.Left, y = this.Top;
-                    if (bmp.Width != curW || bmp.Height != curH)
-                    {
-                        int oldW = curW, oldH = curH;
-                        curW = bmp.Width; curH = bmp.Height;
-                        if (!customPos) { Point a = AutoAnchor(); x = a.X; y = a.Y; }
-                        else { x += oldW - curW; y += (oldH - curH) / 2; }
-                    }
-                    LayeredWindow.Present(this.Handle, bmp, x, y, 255);
-                    this.Location = new Point(x, y);
+                    int oldW = curW, oldH = curH;
+                    curW = bmp.Width; curH = bmp.Height;
+                    if (!customPos) { Point a = AutoAnchor(); x = a.X; y = a.Y; }
+                    else { x += oldW - curW; y += (oldH - curH) / 2; }
                 }
+                LayeredWindow.Present(this.Handle, bmp, x, y, 255, ++widgetVersion);
+                this.Location = new Point(x, y);
                 lastRenderKey = RenderKey();
             }
             catch { }
@@ -490,10 +521,7 @@ namespace NetMonitor
 
         private string RenderKey()
         {
-            string un, uu, dn, du;
-            SpeedFmt.Format(S, liveUpBits, true, out un, out uu);
-            SpeedFmt.Format(S, liveDownBits, false, out dn, out du);
-            return un + uu + dn + du;
+            return upNum + upUnit + dnNum + dnUnit;
         }
 
 
@@ -539,6 +567,20 @@ namespace NetMonitor
         // 1) barra com "ocultar automaticamente" recolhida; 2) Direct3D exclusivo / modo apresentação;
         // 3) janela em primeiro plano cobrindo o monitor inteiro do widget (F11, jogos sem borda,
         //    preview em tela cheia do Premiere/After Effects, vídeos).
+        // Só refaz a verificação cara quando o primeiro plano muda (ou a cada 2 s, como rede de segurança).
+        private bool FullscreenNow()
+        {
+            IntPtr fg = GetForegroundWindow();
+            bool stale = (DateTime.UtcNow - fullscreenAt).TotalSeconds > 2;
+            if (fg != lastForeground || stale)
+            {
+                lastForeground = fg;
+                fullscreenAt = DateTime.UtcNow;
+                fullscreenCache = IsFullscreenAppActive();
+            }
+            return fullscreenCache;
+        }
+
         private bool IsFullscreenAppActive()
         {
             try
@@ -592,7 +634,8 @@ namespace NetMonitor
                    string.Equals(name, "scrnsave", StringComparison.OrdinalIgnoreCase);
         }
 
-        public static bool IsAnyScreensaverActive()
+        // deep: inclui a varredura Toolhelp (cara). As verificações baratas rodam sempre.
+        public static bool IsAnyScreensaverActive(bool deep)
         {
             try
             {
@@ -636,6 +679,7 @@ namespace NetMonitor
                 }
 
                 // 4. Varredura via Toolhelp32 de processos .scr ativos em tela cheia (sem pai e com tamanho real)
+                if (!deep) return false;
                 IntPtr hSnap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
                 if (hSnap != IntPtr.Zero && hSnap != (IntPtr)(-1))
                 {
@@ -743,151 +787,125 @@ namespace NetMonitor
             return bestNic;
         }
 
-        private static HashSet<int> GetActiveNetworkPids()
+        // Buffers reaproveitados entre amostragens (a amostragem é serializada por QueueSample).
+        private static IntPtr tcp4Buf, tcp6Buf, udp4Buf, udp6Buf;
+        private static int tcp4Cap, tcp6Cap, udp4Cap, udp6Cap;
+        private const int TCP4_ROW = 24, TCP6_ROW = 56, UDP4_ROW = 12, UDP6_ROW = 28;
+        private readonly HashSet<int> activePids = new HashSet<int>();
+
+        // Uma chamada por tabela (o buffer já tem capacidade); cresce só quando o Windows pede.
+        private static bool FetchTable(bool udp, int af, ref IntPtr buf, ref int cap, out int count)
         {
-            HashSet<int> pids = new HashSet<int>();
+            count = 0;
+            int need = 0;
+            if (udp) GetExtendedUdpTable(IntPtr.Zero, ref need, false, af, UDP_TABLE_OWNER_PID, 0);
+            else GetExtendedTcpTable(IntPtr.Zero, ref need, false, af, TCP_TABLE_OWNER_PID_ALL, 0);
+
+            if (need <= 0) return false;
+            if (need > cap)
+            {
+                if (buf != IntPtr.Zero) Marshal.FreeHGlobal(buf);
+                buf = Marshal.AllocHGlobal(need);
+                cap = need;
+            }
+
+            int size = cap;
+            uint r = udp
+                ? GetExtendedUdpTable(buf, ref size, false, af, UDP_TABLE_OWNER_PID, 0)
+                : GetExtendedTcpTable(buf, ref size, false, af, TCP_TABLE_OWNER_PID_ALL, 0);
+
+            if (r != 0) return false;   // 122 = tabela cresceu; a próxima chamada realoca
+            count = Marshal.ReadInt32(buf);
+            return true;
+        }
+
+        private HashSet<int> GetActiveNetworkPids()
+        {
+            HashSet<int> pids = activePids;
+            pids.Clear();
+            int count;
 
             // 1. TCP IPv4 - Filtro rigoroso: apenas conexões ESTABLISHED (state == 5) para IPs externos reais
-            int size = 0;
-            GetExtendedTcpTable(IntPtr.Zero, ref size, false, AF_INET, TCP_TABLE_OWNER_PID_ALL, 0);
-            if (size > 0)
+            if (FetchTable(false, AF_INET, ref tcp4Buf, ref tcp4Cap, out count))
             {
-                IntPtr buf = Marshal.AllocHGlobal(size);
-                try
+                IntPtr row = (IntPtr)((long)tcp4Buf + 4);
+                for (int i = 0; i < count; i++, row = (IntPtr)((long)row + TCP4_ROW))
                 {
-                    if (GetExtendedTcpTable(buf, ref size, false, AF_INET, TCP_TABLE_OWNER_PID_ALL, 0) == 0)
-                    {
-                        int count = Marshal.ReadInt32(buf);
-                        IntPtr rowPtr = (IntPtr)((long)buf + 4);
-                        int rowSize = Marshal.SizeOf(typeof(MIB_TCPROW_OWNER_PID));
-                        for (int i = 0; i < count; i++)
-                        {
-                            MIB_TCPROW_OWNER_PID row = (MIB_TCPROW_OWNER_PID)Marshal.PtrToStructure(rowPtr, typeof(MIB_TCPROW_OWNER_PID));
-                            // state == 5 (MIB_TCP_STATE_ESTAB)
-                            if (row.owningPid > 4 && row.state == 5)
-                            {
-                                uint rem = row.remoteAddr;
-                                uint loc = row.localAddr;
-                                byte remFirst = (byte)(rem & 0xFF);
-                                byte locFirst = (byte)(loc & 0xFF);
+                    int pid = Marshal.ReadInt32(row, 20);
+                    if (pid <= 4) continue;
+                    if (Marshal.ReadInt32(row, 0) != 5) continue;   // MIB_TCP_STATE_ESTAB
 
-                                // Ignora 0.0.0.0 e loopback 127.x.x.x
-                                if (rem != 0 && (!filterLoopback || (remFirst != 127 && locFirst != 127)))
-                                {
-                                    pids.Add(row.owningPid);
-                                }
-                            }
-                            rowPtr = (IntPtr)((long)rowPtr + rowSize);
-                        }
-                    }
+                    int rem = Marshal.ReadInt32(row, 12);
+                    int loc = Marshal.ReadInt32(row, 4);
+
+                    // Ignora 0.0.0.0 e loopback 127.x.x.x
+                    if (rem == 0) continue;
+                    if (filterLoopback && ((rem & 0xFF) == 127 || (loc & 0xFF) == 127)) continue;
+
+                    pids.Add(pid);
                 }
-                finally { Marshal.FreeHGlobal(buf); }
             }
 
             // 2. TCP IPv6 - Filtro rigoroso: apenas conexões ESTABLISHED (state == 5) para IPs externos reais
-            size = 0;
-            GetExtendedTcpTable(IntPtr.Zero, ref size, false, AF_INET6, TCP_TABLE_OWNER_PID_ALL, 0);
-            if (size > 0)
+            if (FetchTable(false, AF_INET6, ref tcp6Buf, ref tcp6Cap, out count))
             {
-                IntPtr buf = Marshal.AllocHGlobal(size);
-                try
+                IntPtr row = (IntPtr)((long)tcp6Buf + 4);
+                for (int i = 0; i < count; i++, row = (IntPtr)((long)row + TCP6_ROW))
                 {
-                    if (GetExtendedTcpTable(buf, ref size, false, AF_INET6, TCP_TABLE_OWNER_PID_ALL, 0) == 0)
-                    {
-                        int count = Marshal.ReadInt32(buf);
-                        IntPtr rowPtr = (IntPtr)((long)buf + 4);
-                        int rowSize = Marshal.SizeOf(typeof(MIB_TCP6ROW_OWNER_PID));
-                        for (int i = 0; i < count; i++)
-                        {
-                            MIB_TCP6ROW_OWNER_PID row = (MIB_TCP6ROW_OWNER_PID)Marshal.PtrToStructure(rowPtr, typeof(MIB_TCP6ROW_OWNER_PID));
-                            if (row.owningPid > 4 && row.state == 5 && row.ucRemoteAddr != null && row.ucRemoteAddr.Length == 16)
-                            {
-                                bool isZero = true;
-                                for (int b = 0; b < 16; b++) { if (row.ucRemoteAddr[b] != 0) { isZero = false; break; } }
+                    int pid = Marshal.ReadInt32(row, 52);
+                    if (pid <= 4) continue;
+                    if (Marshal.ReadInt32(row, 48) != 5) continue;
 
-                                if (!isZero)
-                                {
-                                    // Verifica se é loopback ::1
-                                    bool isLoopback6 = true;
-                                    for (int b = 0; b < 15; b++) { if (row.ucRemoteAddr[b] != 0) { isLoopback6 = false; break; } }
-                                    if (!filterLoopback || !(isLoopback6 && row.ucRemoteAddr[15] == 1))
-                                    {
-                                        // Verifica link-local fe80::
-                                        if (!(row.ucRemoteAddr[0] == 0xFE && (row.ucRemoteAddr[1] & 0xC0) == 0x80))
-                                        {
-                                            pids.Add(row.owningPid);
-                                        }
-                                    }
-                                }
-                            }
-                            rowPtr = (IntPtr)((long)rowPtr + rowSize);
-                        }
-                    }
+                    const int remOff = 24;
+                    bool isZero = true;
+                    for (int b = 0; b < 16; b++) { if (Marshal.ReadByte(row, remOff + b) != 0) { isZero = false; break; } }
+                    if (isZero) continue;
+
+                    // Verifica se é loopback ::1
+                    bool isLoopback6 = true;
+                    for (int b = 0; b < 15; b++) { if (Marshal.ReadByte(row, remOff + b) != 0) { isLoopback6 = false; break; } }
+                    if (filterLoopback && isLoopback6 && Marshal.ReadByte(row, remOff + 15) == 1) continue;
+
+                    // Verifica link-local fe80::
+                    byte b0 = Marshal.ReadByte(row, remOff), b1 = Marshal.ReadByte(row, remOff + 1);
+                    if (b0 == 0xFE && (b1 & 0xC0) == 0x80) continue;
+
+                    pids.Add(pid);
                 }
-                finally { Marshal.FreeHGlobal(buf); }
             }
 
             // 3. UDP IPv4 - Filtra loopback
-            size = 0;
-            GetExtendedUdpTable(IntPtr.Zero, ref size, false, AF_INET, UDP_TABLE_OWNER_PID, 0);
-            if (size > 0)
+            if (FetchTable(true, AF_INET, ref udp4Buf, ref udp4Cap, out count))
             {
-                IntPtr buf = Marshal.AllocHGlobal(size);
-                try
+                IntPtr row = (IntPtr)((long)udp4Buf + 4);
+                for (int i = 0; i < count; i++, row = (IntPtr)((long)row + UDP4_ROW))
                 {
-                    if (GetExtendedUdpTable(buf, ref size, false, AF_INET, UDP_TABLE_OWNER_PID, 0) == 0)
-                    {
-                        int count = Marshal.ReadInt32(buf);
-                        IntPtr rowPtr = (IntPtr)((long)buf + 4);
-                        int rowSize = Marshal.SizeOf(typeof(MIB_UDPROW_OWNER_PID));
-                        for (int i = 0; i < count; i++)
-                        {
-                            MIB_UDPROW_OWNER_PID row = (MIB_UDPROW_OWNER_PID)Marshal.PtrToStructure(rowPtr, typeof(MIB_UDPROW_OWNER_PID));
-                            if (row.owningPid > 4)
-                            {
-                                byte locFirst = (byte)(row.localAddr & 0xFF);
-                                if (row.localAddr != 0 && (!filterLoopback || locFirst != 127))
-                                {
-                                    pids.Add(row.owningPid);
-                                }
-                            }
-                            rowPtr = (IntPtr)((long)rowPtr + rowSize);
-                        }
-                    }
+                    int pid = Marshal.ReadInt32(row, 8);
+                    if (pid <= 4) continue;
+
+                    int loc = Marshal.ReadInt32(row, 0);
+                    if (loc == 0) continue;
+                    if (filterLoopback && (loc & 0xFF) == 127) continue;
+
+                    pids.Add(pid);
                 }
-                finally { Marshal.FreeHGlobal(buf); }
             }
 
             // 4. UDP IPv6 - Filtra loopback
-            size = 0;
-            GetExtendedUdpTable(IntPtr.Zero, ref size, false, AF_INET6, UDP_TABLE_OWNER_PID, 0);
-            if (size > 0)
+            if (FetchTable(true, AF_INET6, ref udp6Buf, ref udp6Cap, out count))
             {
-                IntPtr buf = Marshal.AllocHGlobal(size);
-                try
+                IntPtr row = (IntPtr)((long)udp6Buf + 4);
+                for (int i = 0; i < count; i++, row = (IntPtr)((long)row + UDP6_ROW))
                 {
-                    if (GetExtendedUdpTable(buf, ref size, false, AF_INET6, UDP_TABLE_OWNER_PID, 0) == 0)
-                    {
-                        int count = Marshal.ReadInt32(buf);
-                        IntPtr rowPtr = (IntPtr)((long)buf + 4);
-                        int rowSize = Marshal.SizeOf(typeof(MIB_UDP6ROW_OWNER_PID));
-                        for (int i = 0; i < count; i++)
-                        {
-                            MIB_UDP6ROW_OWNER_PID row = (MIB_UDP6ROW_OWNER_PID)Marshal.PtrToStructure(rowPtr, typeof(MIB_UDP6ROW_OWNER_PID));
-                            if (row.owningPid > 4 && row.ucLocalAddr != null && row.ucLocalAddr.Length == 16)
-                            {
-                                bool isLoopback6 = true;
-                                for (int b = 0; b < 15; b++) { if (row.ucLocalAddr[b] != 0) { isLoopback6 = false; break; } }
-                                if (!filterLoopback || !(isLoopback6 && row.ucLocalAddr[15] == 1))
-                                {
-                                    pids.Add(row.owningPid);
-                                }
-                            }
-                            rowPtr = (IntPtr)((long)rowPtr + rowSize);
-                        }
-                    }
+                    int pid = Marshal.ReadInt32(row, 24);
+                    if (pid <= 4) continue;
+
+                    bool isLoopback6 = true;
+                    for (int b = 0; b < 15; b++) { if (Marshal.ReadByte(row, b) != 0) { isLoopback6 = false; break; } }
+                    if (filterLoopback && isLoopback6 && Marshal.ReadByte(row, 15) == 1) continue;
+
+                    pids.Add(pid);
                 }
-                finally { Marshal.FreeHGlobal(buf); }
             }
 
             return pids;
@@ -944,12 +962,15 @@ namespace NetMonitor
             updateTimer.Interval = 300;
             bool ssCached = false;
             int ssTick = 0;
+            int anchorTick = 0;
+            int topmostTick = 0;
+            int themeTick = 0;
             updateTimer.Tick += (s, e) =>
             {
-                // a varredura de protetor de tela é cara: roda a cada ~0,9 s, não a cada tick de 300 ms
-                if (S.HideOnScreensaver && ssTick++ % 3 == 0) ssCached = IsAnyScreensaverActive();
+                // baratas a cada ~0,9 s; a varredura Toolhelp (cara) a cada ~10 s
+                if (S.HideOnScreensaver && ssTick++ % 3 == 0) ssCached = IsAnyScreensaverActive(ssTick % 33 == 0);
                 // app/jogo em tela cheia no monitor do widget (F11, jogos): some para não ficar por cima
-                bool fullscreen = IsFullscreenAppActive();
+                bool fullscreen = FullscreenNow();
                 {
                     if ((S.HideOnScreensaver && (ssCached || isSessionLocked)) || fullscreen)
                     {
@@ -976,16 +997,24 @@ namespace NetMonitor
                     tickCount = 0;
                     UpdateTraffic();
                     if (settingsOpen) PushData();
-                    if (IsWindowsDarkTheme() != lastSystemDark) { ApplySystemTheme(); ScheduleThemeRepaint(); }
-                    if (!customPos && this.Visible && !isScreensaverRunning)
+                    // o tema já chega por SystemEvents/WM_SETTINGCHANGE; isto é só rede de segurança a cada ~30 s
+                    if (++themeTick >= 100)
                     {
+                        themeTick = 0;
+                        if (IsWindowsDarkTheme() != lastSystemDark) { ApplySystemTheme(); ScheduleThemeRepaint(); }
+                    }
+                    if (!customPos && this.Visible && !isScreensaverRunning && ++anchorTick >= 7)
+                    {
+                        anchorTick = 0;
                         Point a = AutoAnchor();
                         if (a != this.Location) { this.Location = a; if (flyout != null && flyout.Visible) PositionFlyout(); }
                     }
                 }
 
-                if (this.Visible && !isScreensaverRunning && !isSessionLocked)
+                // WM_WINDOWPOSCHANGING já reafirma o TOPMOST; aqui é só reforço a cada ~2 s
+                if (this.Visible && !isScreensaverRunning && !isSessionLocked && ++topmostTick >= 7)
                 {
+                    topmostTick = 0;
                     SetWindowPos(this.Handle, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
                 }
             };
@@ -1027,6 +1056,7 @@ namespace NetMonitor
 
             if (m.Msg == WM_DPICHANGED)
             {
+                dpiCache = 0f;
                 MeasureWidget();
                 RenderWidget();
                 if (flyout != null && flyout.Visible) UpdateFlyout();
@@ -1050,6 +1080,7 @@ namespace NetMonitor
         {
             string oldAdapter;
             lock (sLock) { oldAdapter = S.Adapter; S = ns; }
+            menuDirty = true;
             filterLoopback = S.LoopbackFilter;
             lastSystemDark = IsWindowsDarkTheme();
             if (persist) S.Save();
@@ -1226,6 +1257,7 @@ namespace NetMonitor
         // Zero CPU quando nada muda: só redesenha se o texto exibido mudou
         private void RenderIfChanged()
         {
+            UpdateFormattedSpeeds();
             string k = RenderKey();
             if (k != lastRenderKey) RenderWidget();
         }
@@ -1262,7 +1294,7 @@ namespace NetMonitor
             if (e.Button == MouseButtons.Right)
             {
                 HideFlyoutIfNotPinned();
-                BuildContextMenu();
+                if (menuDirty || contextMenu == null || contextMenu.IsDisposed) BuildContextMenu();
                 Screen scr = Screen.FromControl(this);
                 if (scr == null) scr = Screen.PrimaryScreen;
                 Rectangle b = scr.Bounds;
@@ -1303,7 +1335,8 @@ namespace NetMonitor
 
             isHoverSampling = true;
             lastProcessIo.Clear();
-            ThreadPool.QueueUserWorkItem(DoProcessSampleWork);
+            cachedUnified.Clear();
+            QueueSample();
             EnsureSampling();
 
             if (hoverCheckTimer == null)
@@ -1333,8 +1366,8 @@ namespace NetMonitor
                 processSampleTimer.Tick += (s, e) =>
                 {
                     bool need = (flyout != null && flyout.Visible) || settingsSampling;
-                    if (need) ThreadPool.QueueUserWorkItem(DoProcessSampleWork);
-                    else { processSampleTimer.Stop(); isHoverSampling = false; lastProcessIo.Clear(); cachedProcessNames.Clear(); }
+                    if (need) QueueSample();
+                    else { processSampleTimer.Stop(); isHoverSampling = false; lastProcessIo.Clear(); cachedProcessNames.Clear(); cachedUnified.Clear(); }
                 };
             }
             if (!processSampleTimer.Enabled) processSampleTimer.Start();
@@ -1376,6 +1409,7 @@ namespace NetMonitor
             string n = name.ToLowerInvariant();
             switch (n)
             {
+                case "ollama": return "IA Local";
                 case "chrome": case "msedge": case "firefox": case "brave": case "opera": case "vivaldi": return "Navegador";
                 case "spotify": return "Música";
                 case "discord": case "slack": case "telegram": case "whatsapp": case "zoom": case "teams": case "ms-teams": return "Voz e Chat";
@@ -1411,6 +1445,75 @@ namespace NetMonitor
             return null;
         }
 
+        private string GetUnifiedAppName(int pid)
+        {
+            string name = GetProcessName(pid);
+            if (string.IsNullOrEmpty(name)) return "unknown";
+            if (name.EndsWith(".exe", StringComparison.OrdinalIgnoreCase))
+                name = name.Substring(0, name.Length - 4);
+
+            string lower = name.ToLowerInvariant();
+
+            if (lower.StartsWith("ollama") || lower.Equals("llama-server"))
+                return "ollama";
+            if (lower.StartsWith("msedge") || lower.Equals("msedgewebview2"))
+                return "msedge";
+            if (lower.StartsWith("chrome"))
+                return "chrome";
+            if (lower.StartsWith("firefox"))
+                return "firefox";
+            if (lower.StartsWith("brave"))
+                return "brave";
+            if (lower.StartsWith("opera"))
+                return "opera";
+            if (lower.Equals("code"))
+                return "Code";
+            if (lower.StartsWith("steam") || lower.Equals("steamwebhelper"))
+                return "steam";
+            if (lower.StartsWith("discord"))
+                return "Discord";
+            if (lower.Equals("googledrivefs"))
+                return "GoogleDriveFS";
+            if (lower.Equals("onedrive"))
+                return "OneDrive";
+            if (lower.Equals("dropbox"))
+                return "Dropbox";
+
+            string path = GetProcessPath(pid);
+            if (!string.IsNullOrEmpty(path))
+            {
+                if (path.IndexOf(@"\Ollama\", StringComparison.OrdinalIgnoreCase) >= 0)
+                    return "ollama";
+            }
+
+            return name;
+        }
+
+        // Nome unificado é estável enquanto o PID vive: evita reabrir o processo a cada segundo.
+        private string GetUnifiedNameCached(int pid)
+        {
+            string n;
+            if (cachedUnified.TryGetValue(pid, out n)) return n;
+            n = GetUnifiedAppName(pid);
+            if (cachedUnified.Count >= 512) cachedUnified.Clear();
+            cachedUnified[pid] = n;
+            return n;
+        }
+
+        // Garante uma única amostragem por vez (evita acesso concorrente aos dicionários)
+        private int sampleBusy; // 0 = livre, 1 = ocupado
+
+        private void QueueSample()
+        {
+            if (Interlocked.CompareExchange(ref sampleBusy, 1, 0) != 0) return;
+            ThreadPool.QueueUserWorkItem(_ =>
+            {
+                try { DoProcessSampleWork(null); }
+                catch (Exception ex) { CrashLog.Write("Amostragem", ex); }
+                finally { Interlocked.Exchange(ref sampleBusy, 0); }
+            });
+        }
+
         private void DoProcessSampleWork(object state)
         {
             if (!isHoverSampling) return;
@@ -1422,9 +1525,7 @@ namespace NetMonitor
                 lastSampleAt = now;
                 double physRx = physRxBytes, physTx = physTxBytes;
 
-                Dictionary<string, ulong> appTx = new Dictionary<string, ulong>(StringComparer.OrdinalIgnoreCase);
-                Dictionary<string, ulong> appRx = new Dictionary<string, ulong>(StringComparer.OrdinalIgnoreCase);
-                Dictionary<string, int> appPid = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+                appAcc.Clear();
 
                 foreach (int pid in activePids)
                 {
@@ -1434,23 +1535,27 @@ namespace NetMonitor
                     {
                         IO_COUNTERS c;
                         if (!GetProcessIoCounters(hProc, out c)) continue;
-                        IoSnap cur = new IoSnap { R = c.ReadTransferCount, W = c.WriteTransferCount };
+                        IoSnap cur = new IoSnap { R = c.ReadTransferCount, W = c.WriteTransferCount, O = c.OtherTransferCount };
                         IoSnap last;
                         if (lastProcessIo.TryGetValue(pid, out last))
                         {
-                            ulong dr = cur.R >= last.R ? (ulong)((cur.R - last.R) / elapsed) : 0;
-                            ulong dw = cur.W >= last.W ? (ulong)((cur.W - last.W) / elapsed) : 0;
+                            ulong deltaR = cur.R >= last.R ? (cur.R - last.R) : 0;
+                            ulong deltaW = cur.W >= last.W ? (cur.W - last.W) : 0;
+                            ulong deltaO = cur.O >= last.O ? (cur.O - last.O) : 0;
+                            ulong dr = (physRx > 1024) ? (ulong)((deltaR + deltaO) / elapsed) : 0;
+                            ulong dw = (physTx > 1024) ? (ulong)(deltaW / elapsed) : 0;
                             // Isolamento de I/O de disco: um processo não transfere pela rede mais que a placa mediu.
-                            ulong capR = (ulong)(physRx * 1.2) + 4096, capW = (ulong)(physTx * 1.2) + 4096;
-                            if (dr > capR) dr = physRx > 100 ? (ulong)physRx : 0;
-                            if (dw > capW) dw = physTx > 100 ? (ulong)physTx : 0;
+                            ulong capR = (ulong)(physRx * 1.15) + 4096, capW = (ulong)(physTx * 1.15) + 4096;
+                            if (dr > capR) dr = (ulong)physRx;
+                            if (dw > capW) dw = (ulong)physTx;
                             if (dr > 0 || dw > 0)
                             {
-                                string baseName = GetProcessName(pid);
-                                if (baseName.EndsWith(".exe", StringComparison.OrdinalIgnoreCase)) baseName = baseName.Substring(0, baseName.Length - 4);
-                                if (!appTx.ContainsKey(baseName)) { appTx[baseName] = 0; appRx[baseName] = 0; appPid[baseName] = pid; }
-                                appTx[baseName] += dw;
-                                appRx[baseName] += dr;
+                                string baseName = GetUnifiedNameCached(pid);
+                                AppAcc acc2;
+                                if (!appAcc.TryGetValue(baseName, out acc2)) acc2 = new AppAcc { Pid = pid };
+                                acc2.Tx += dw;
+                                acc2.Rx += dr;
+                                appAcc[baseName] = acc2;
                             }
                         }
                         lastProcessIo[pid] = cur;
@@ -1460,23 +1565,32 @@ namespace NetMonitor
 
                 if (lastProcessIo.Count > 100)
                 {
-                    List<int> rm = new List<int>();
-                    foreach (int k in lastProcessIo.Keys) if (!activePids.Contains(k)) rm.Add(k);
-                    for (int i = 0; i < rm.Count; i++) lastProcessIo.Remove(rm[i]);
+                    stalePids.Clear();
+                    foreach (int k in lastProcessIo.Keys) if (!activePids.Contains(k)) stalePids.Add(k);
+                    for (int i = 0; i < stalePids.Count; i++)
+                    {
+                        int k = stalePids[i];
+                        lastProcessIo.Remove(k);
+                        cachedProcessNames.Remove(k);
+                        cachedUnified.Remove(k);
+                    }
                 }
 
-                // Normalização coletiva por direção
-                Normalize(appTx, physTx);
-                Normalize(appRx, physRx);
+                // Normalização coletiva por direção, aplicada na leitura (sem mutar o dicionário)
+                ulong totalTx = 0, totalRx = 0;
+                foreach (AppAcc v in appAcc.Values) { totalTx += v.Tx; totalRx += v.Rx; }
+                double scaleTx = (physTx <= 1024 || totalTx == 0) ? 0 : physTx / (double)totalTx;
+                double scaleRx = (physRx <= 1024 || totalRx == 0) ? 0 : physRx / (double)totalRx;
 
                 List<ProcessTrafficItem> items = new List<ProcessTrafficItem>();
-                foreach (var kv in appTx)
+                foreach (var kv in appAcc)
                 {
-                    ulong tx = kv.Value, rx = appRx[kv.Key];
+                    ulong tx = (ulong)Math.Round(kv.Value.Tx * scaleTx);
+                    ulong rx = (ulong)Math.Round(kv.Value.Rx * scaleRx);
                     if (tx == 0 && rx == 0) continue;
                     string sub;
-                    if (!subCache.TryGetValue(kv.Key, out sub)) { sub = CategoryFor(kv.Key, GetProcessPath(appPid[kv.Key])); subCache[kv.Key] = sub; }
-                    items.Add(new ProcessTrafficItem { Pid = appPid[kv.Key], Name = kv.Key, Sub = sub, TxBytes = tx, RxBytes = rx });
+                    if (!subCache.TryGetValue(kv.Key, out sub)) { sub = CategoryFor(kv.Key, GetProcessPath(kv.Value.Pid)); subCache[kv.Key] = sub; }
+                    items.Add(new ProcessTrafficItem { Pid = kv.Value.Pid, Name = kv.Key, Sub = sub, TxBytes = tx, RxBytes = rx });
                 }
                 items.Sort((a, b) => b.Total.CompareTo(a.Total));
                 if (items.Count > 5) items.RemoveRange(5, items.Count - 5);
@@ -1485,20 +1599,7 @@ namespace NetMonitor
                 if (this.IsHandleCreated && flyout != null && flyout.Visible)
                     this.BeginInvoke((MethodInvoker)delegate { UpdateFlyout(); });
             }
-            catch { }
-        }
-
-        private static void Normalize(Dictionary<string, ulong> d, double phys)
-        {
-            ulong total = 0;
-            foreach (var v in d.Values) total += v;
-            ulong max = (ulong)(phys * 1.25) + 8192;
-            if (total > max && total > 0 && phys > 0)
-            {
-                double scale = phys / (double)total;
-                List<string> keys = new List<string>(d.Keys);
-                foreach (string k in keys) d[k] = (ulong)(d[k] * scale);
-            }
+            catch (Exception ex) { CrashLog.Write("DoProcessSampleWork", ex); }
         }
 
         // ------------------------------------------------------------------ menu de contexto
@@ -1582,10 +1683,11 @@ namespace NetMonitor
             mnuExit.Click += (s, e) =>
             {
                 try { HideFlyout(true); this.Close(); }
-                catch { Environment.Exit(0); }
+                catch (Exception ex) { CrashLog.Write("Sair", ex); Environment.Exit(0); }
             };
             contextMenu.Items.Add(mnuExit);
             StyleItems(contextMenu.Items, menuFont, isDark);
+            menuDirty = false;
         }
 
         // Troca as cores do menu (inclusive aberto) quando o tema do Windows muda
@@ -1727,9 +1829,9 @@ namespace NetMonitor
             else if (code == Ipc.Sampling)
             {
                 settingsSampling = text == "1";
-                if (settingsSampling) { EnsureSampling(); ThreadPool.QueueUserWorkItem(DoProcessSampleWork); }
+                if (settingsSampling) { EnsureSampling(); QueueSample(); }
             }
-            else if (code == Ipc.Refresh) ThreadPool.QueueUserWorkItem(DoProcessSampleWork);
+            else if (code == Ipc.Refresh) QueueSample();
         }
 
         private void SettingsGone()
@@ -1753,19 +1855,32 @@ namespace NetMonitor
             Ipc.Send(settingsHwnd, Ipc.Data, BuildDataText(), this.Handle);
         }
 
+        private static void AppendField(StringBuilder sb, string s)
+        {
+            if (string.IsNullOrEmpty(s)) return;
+            if (s.IndexOf('\t') < 0) sb.Append(s);
+            else sb.Append(s.Replace('\t', ' '));
+        }
+
         private string BuildDataText()
         {
             double cpu, ram;
             PerfInfo(out cpu, out ram);
             CultureInfo inv = CultureInfo.InvariantCulture;
-            StringBuilder sb = new StringBuilder();
+            StringBuilder sb = dataSb;
+            sb.Length = 0;
             sb.Append("up=").Append(liveUpBits.ToString("R", inv)).Append('\n');
             sb.Append("dn=").Append(liveDownBits.ToString("R", inv)).Append('\n');
             sb.Append("cpu=").Append(cpu.ToString("R", inv)).Append('\n');
             sb.Append("ram=").Append(ram.ToString("R", inv)).Append('\n');
             foreach (ProcessTrafficItem it in TopApps())
-                sb.Append("app=").Append(it.Name.Replace('\t', ' ')).Append('\t').Append((it.Sub ?? "").Replace('\t', ' '))
-                  .Append('\t').Append(it.TxBytes).Append('\t').Append(it.RxBytes).Append('\n');
+            {
+                sb.Append("app=");
+                AppendField(sb, it.Name);
+                sb.Append('\t');
+                AppendField(sb, it.Sub);
+                sb.Append('\t').Append(it.TxBytes).Append('\t').Append(it.RxBytes).Append('\n');
+            }
             return sb.ToString();
         }
 
@@ -1779,7 +1894,8 @@ namespace NetMonitor
                     while (true)
                     {
                         try { ev.WaitOne(); this.BeginInvoke((MethodInvoker)delegate { OpenSettingsDialog("cores"); }); }
-                        catch { break; }
+                        catch (ObjectDisposedException) { break; }
+                        catch (Exception ex) { CrashLog.Write("OpenSettingsListener", ex); Thread.Sleep(500); }
                     }
                 }) { IsBackground = true, Name = "NetMonitorOpenSettings" };
                 t.Start();
@@ -1794,13 +1910,12 @@ namespace NetMonitor
         {
             lock (sLock)
             {
-                Process p = Process.GetCurrentProcess();
-                TimeSpan t = p.TotalProcessorTime;
+                TimeSpan t = self.TotalProcessorTime;
                 DateTime now = DateTime.UtcNow;
                 double el = (now - lastCpuAt).TotalSeconds;
                 cpuPct = (lastCpuAt == DateTime.MinValue || el <= 0) ? 0 : (t - lastCpu).TotalSeconds / el / Environment.ProcessorCount * 100.0;
                 lastCpu = t; lastCpuAt = now;
-                ramMb = p.WorkingSet64 / 1048576.0;
+                ramMb = self.WorkingSet64 / 1048576.0;
             }
         }
 
@@ -1816,6 +1931,8 @@ namespace NetMonitor
                 if (processSampleTimer != null) { processSampleTimer.Stop(); processSampleTimer.Dispose(); }
                 if (flyout != null) { flyout.Dispose(); flyout = null; }
                 if (trayIcon != null) { trayIcon.Visible = false; trayIcon.Dispose(); }
+                if (this.IsHandleCreated) LayeredWindow.Release(this.Handle);
+                if (widgetBmp != null) { widgetBmp.Dispose(); widgetBmp = null; }
             }
             catch { }
             base.OnFormClosing(e);
@@ -1858,8 +1975,10 @@ namespace NetMonitor
             try
             {
                 Application.SetUnhandledExceptionMode(UnhandledExceptionMode.CatchException);
-                AppDomain.CurrentDomain.UnhandledException += (s, e) => { };
-                Application.ThreadException += (s, e) => { };
+                Application.ThreadException += (s, e) => CrashLog.Write("UI", e.Exception);
+                AppDomain.CurrentDomain.UnhandledException += (s, e) =>
+                    CrashLog.Write("FATAL", e.ExceptionObject as Exception ?? new Exception(string.Format("{0}", e.ExceptionObject)));
+                System.Threading.Tasks.TaskScheduler.UnobservedTaskException += (s, e) => { CrashLog.Write("Task", e.Exception); e.SetObserved(); };
             }
             catch { }
 
@@ -1902,37 +2021,72 @@ namespace NetMonitor
         [DllImport("gdi32.dll")] static extern IntPtr CreateDIBSection(IntPtr hdc, ref BMIH pbmi, uint usage, out IntPtr bits, IntPtr hSection, uint offset);
         [DllImport("kernel32.dll", EntryPoint = "RtlMoveMemory")] static extern void CopyMemory(IntPtr dest, IntPtr src, UIntPtr count);
 
-        public static void Present(IntPtr hwnd, Bitmap bmp, int x, int y, byte alpha)
+        // Uma superfície (DC + DIB) por janela; recriada só quando o tamanho muda.
+        class Surface
+        {
+            public IntPtr Mem, Dib, Old, Bits;
+            public int W, H, LastVersion = -1;
+        }
+
+        static readonly Dictionary<IntPtr, Surface> surfaces = new Dictionary<IntPtr, Surface>();
+
+        static Surface CreateSurface(IntPtr screen, int w, int h)
+        {
+            IntPtr mem = CreateCompatibleDC(screen);
+            BMIH bi = new BMIH();
+            bi.biSize = (uint)Marshal.SizeOf(typeof(BMIH));
+            bi.biWidth = w; bi.biHeight = -h; bi.biPlanes = 1; bi.biBitCount = 32;
+            IntPtr bits;
+            IntPtr dib = CreateDIBSection(screen, ref bi, 0, out bits, IntPtr.Zero, 0);
+            if (dib == IntPtr.Zero) { DeleteDC(mem); return null; }
+            IntPtr old = SelectObject(mem, dib);
+            return new Surface { Mem = mem, Dib = dib, Old = old, Bits = bits, W = w, H = h };
+        }
+
+        static void FreeSurface(Surface sf)
+        {
+            if (sf.Old != IntPtr.Zero) SelectObject(sf.Mem, sf.Old);
+            if (sf.Dib != IntPtr.Zero) DeleteObject(sf.Dib);
+            if (sf.Mem != IntPtr.Zero) DeleteDC(sf.Mem);
+        }
+
+        public static void Release(IntPtr hwnd)
+        {
+            Surface sf;
+            if (surfaces.TryGetValue(hwnd, out sf)) { FreeSurface(sf); surfaces.Remove(hwnd); }
+        }
+
+        // version: incremente sempre que os pixels do bitmap mudarem. A animação reapresenta
+        // o mesmo bitmap com a mesma versão, então os pixels não são copiados de novo.
+        public static void Present(IntPtr hwnd, Bitmap bmp, int x, int y, byte alpha, int version)
         {
             IntPtr screen = GetDC(IntPtr.Zero);
-            IntPtr mem = CreateCompatibleDC(screen);
-            IntPtr hbmp = IntPtr.Zero, old = IntPtr.Zero;
             try
             {
-                BMIH h = new BMIH();
-                h.biSize = (uint)Marshal.SizeOf(typeof(BMIH));
-                h.biWidth = bmp.Width; h.biHeight = -bmp.Height; h.biPlanes = 1; h.biBitCount = 32;
-                IntPtr bits;
-                hbmp = CreateDIBSection(screen, ref h, 0, out bits, IntPtr.Zero, 0);
-                if (hbmp == IntPtr.Zero) return;
-                BitmapData bd = bmp.LockBits(new Rectangle(0, 0, bmp.Width, bmp.Height), ImageLockMode.ReadOnly, PixelFormat.Format32bppPArgb);
-                try { CopyMemory(bits, bd.Scan0, (UIntPtr)(uint)(bd.Stride * bmp.Height)); }
-                finally { bmp.UnlockBits(bd); }
-                old = SelectObject(mem, hbmp);
+                Surface sf;
+                if (!surfaces.TryGetValue(hwnd, out sf) || sf.W != bmp.Width || sf.H != bmp.Height)
+                {
+                    if (sf != null) FreeSurface(sf);
+                    sf = CreateSurface(screen, bmp.Width, bmp.Height);
+                    if (sf == null) return;
+                    surfaces[hwnd] = sf;
+                }
+
+                if (sf.LastVersion != version)
+                {
+                    BitmapData bd = bmp.LockBits(new Rectangle(0, 0, bmp.Width, bmp.Height), ImageLockMode.ReadOnly, PixelFormat.Format32bppPArgb);
+                    try { CopyMemory(sf.Bits, bd.Scan0, (UIntPtr)(uint)(bd.Stride * bmp.Height)); }
+                    finally { bmp.UnlockBits(bd); }
+                    sf.LastVersion = version;
+                }
 
                 PT dst = new PT { x = x, y = y };
                 PT src = new PT { x = 0, y = 0 };
                 SZ sz = new SZ { cx = bmp.Width, cy = bmp.Height };
                 BLEND bf = new BLEND { BlendOp = 0, BlendFlags = 0, SourceConstantAlpha = alpha, AlphaFormat = 1 };
-                UpdateLayeredWindow(hwnd, screen, ref dst, ref sz, mem, ref src, 0, ref bf, 2);
+                UpdateLayeredWindow(hwnd, screen, ref dst, ref sz, sf.Mem, ref src, 0, ref bf, 2);
             }
-            finally
-            {
-                ReleaseDC(IntPtr.Zero, screen);
-                if (old != IntPtr.Zero) SelectObject(mem, old);
-                if (hbmp != IntPtr.Zero) DeleteObject(hbmp);
-                DeleteDC(mem);
-            }
+            finally { ReleaseDC(IntPtr.Zero, screen); }
         }
     }
 
@@ -1943,6 +2097,7 @@ namespace NetMonitor
     {
         private readonly NetMonitorApp app;
         private Bitmap bmp;
+        private int bmpVersion;
         private FlyoutHit hit = new FlyoutHit();
         private int hoverRow = -1;
         private float dpi = 96f;
@@ -2000,17 +2155,22 @@ namespace NetMonitor
         private void Redraw()
         {
             IntPtr h = this.Handle;
-            Bitmap nb = FlyoutRenderer.Render(s, dark, items, up, dn, dpi, hoverRow, margin, out hit);
-            Bitmap old = bmp;
-            bmp = nb;
-            if (old != null) old.Dispose();
+            FlyoutHit nh;
+            Bitmap nb = FlyoutRenderer.RenderTo(bmp, s, dark, items, up, dn, dpi, hoverRow, margin, out nh);
+            if (!ReferenceEquals(nb, bmp))
+            {
+                if (bmp != null) bmp.Dispose();
+                bmp = nb;
+            }
+            hit = nh;
+            bmpVersion++;
             Present();
         }
 
         private void Present()
         {
             if (bmp == null || !this.IsHandleCreated) return;
-            LayeredWindow.Present(this.Handle, bmp, basePos.X, basePos.Y + offsetY, alpha);
+            LayeredWindow.Present(this.Handle, bmp, basePos.X, basePos.Y + offsetY, alpha, bmpVersion);
         }
 
         // Centraliza sobre o widget, acima dele (ou abaixo se não couber)
@@ -2090,8 +2250,39 @@ namespace NetMonitor
 
         protected override void Dispose(bool disposing)
         {
-            if (disposing) { if (anim != null) anim.Dispose(); if (bmp != null) bmp.Dispose(); }
+            if (disposing)
+            {
+                if (this.IsHandleCreated) LayeredWindow.Release(this.Handle);
+                if (anim != null) anim.Dispose();
+                if (bmp != null) bmp.Dispose();
+            }
             base.Dispose(disposing);
+        }
+    }
+
+    // ==============================================================================
+    // ==============================================================================
+    // LOG DE EMERGÊNCIA: grava exceções em %LOCALAPPDATA%\NetMonitor\crash.log
+    // ==============================================================================
+    internal static class CrashLog
+    {
+        private static readonly object gate = new object();
+        private static readonly string logFile = System.IO.Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "NetMonitor", "crash.log");
+
+        public static void Write(string origem, object ex)
+        {
+            try
+            {
+                lock (gate)
+                {
+                    Directory.CreateDirectory(System.IO.Path.GetDirectoryName(logFile));
+                    File.AppendAllText(logFile, string.Format(
+                        "[{0:yyyy-MM-dd HH:mm:ss}] {1} (thread {2})\r\n{3}\r\n----\r\n",
+                        DateTime.Now, origem, Thread.CurrentThread.ManagedThreadId, ex));
+                }
+            }
+            catch { }
         }
     }
 
@@ -2106,8 +2297,7 @@ namespace NetMonitor
         {
             try
             {
-                GC.Collect();
-                GC.WaitForPendingFinalizers();
+                // Sem GC.Collect: forçar coleta bloqueia a thread e não reduz memória real.
                 SetProcessWorkingSetSize(Process.GetCurrentProcess().Handle, (IntPtr)(-1), (IntPtr)(-1));
             }
             catch { }

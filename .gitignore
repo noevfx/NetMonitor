@@ -9,3 +9,16 @@ _backups/
 bin/
 *.tmp
 *.log
+
+# Segredos e chaves (nunca versionar)
+.env
+*.env
+*.key
+*.pem
+secrets/
+
+# Rascunhos locais
+scratch/
+
+# Skills do perfil de agente (junction para D:\.IA agents)
+.claude/
