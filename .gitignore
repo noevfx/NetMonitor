@@ -22,3 +22,9 @@ scratch/
 
 # Skills do perfil de agente (junction para D:\.IA agents)
 .claude/
+
+# Instruções de agentes ficam só no computador
+AGENTS.md
+CLAUDE.md
+.clinerules
+.agents/
