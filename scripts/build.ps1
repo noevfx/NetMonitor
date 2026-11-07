@@ -30,7 +30,7 @@ Write-Host "Iniciando Build do NetMonitor v$version..." -ForegroundColor Cyan
 Write-Host "========================================================" -ForegroundColor Cyan
 
 # 1. Fechar processos em execução
-Get-Process NetMonitor, NetMonitorSetup -ErrorAction SilentlyContinue | Stop-Process -Force
+Get-Process NetMonitor, NetMonitorSetup -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
 Start-Sleep -Milliseconds 400
 
 # 2. Criar diretórios necessários
@@ -45,7 +45,7 @@ $installerExe = Join-Path $binDir "NetMonitorSetup.exe"
 $releaseSetup = Join-Path $releaseDir "NetMonitorSetup.exe"
 if (-not $PackageOnly) {
 Write-Host "1. Compilando NetMonitor.exe..." -ForegroundColor Cyan
-& $csc /nologo /target:winexe /optimize+ /platform:anycpu /win32icon:$iconPath /lib:$wpf `
+& $csc /nologo /target:winexe /optimize+ /platform:anycpu /win32icon:$iconPath /win32manifest:"$srcDir\app.manifest" /lib:$wpf `
     /r:$wpfRefs `
     "/res:$resDir\icone_128.png,icone_128.png" "/res:$resDir\icone_256.png,icone_256.png" "/res:$resDir\pix_qrcode.png,pix_qrcode.png" `
     /out:$netMonitorExe `
@@ -56,22 +56,36 @@ if ($LASTEXITCODE -ne 0) { throw "Falha ao compilar NetMonitor.exe" }
 # 4. Compilar uninstall.exe
 $uninstallerExe = Join-Path $binDir "uninstall.exe"
 Write-Host "2. Compilando uninstall.exe..." -ForegroundColor Cyan
-& $csc /nologo /target:winexe /optimize+ /platform:anycpu /win32icon:$iconPath `
+& $csc /nologo /target:winexe /optimize+ /platform:anycpu /win32icon:$iconPath /win32manifest:"$srcDir\uninstall.manifest" `
     /r:System.dll,System.Windows.Forms.dll,System.Drawing.dll `
-    /out:$uninstallerExe "$srcDir\Uninstaller.cs"
+    /out:$uninstallerExe "$srcDir\Uninstaller.cs" "$srcDir\Version.g.cs"
 if ($LASTEXITCODE -ne 0) { throw "Falha ao compilar uninstall.exe" }
+
+# 4b. Assinatura Authenticode opcional dos executaveis internos (antes de embutir no instalador).
+# Defina NETMONITOR_SIGN_PFX (caminho do .pfx) e NETMONITOR_SIGN_PASSWORD para assinar.
+function Invoke-Sign([string]$exe) {
+    if (-not $env:NETMONITOR_SIGN_PFX) { return }
+    $signtool = (Get-Command signtool.exe -ErrorAction SilentlyContinue).Source
+    if (-not $signtool) { throw "NETMONITOR_SIGN_PFX definido, mas signtool.exe nao foi encontrado no PATH." }
+    & $signtool sign /fd SHA256 /f $env:NETMONITOR_SIGN_PFX /p $env:NETMONITOR_SIGN_PASSWORD `
+        /tr http://timestamp.digicert.com /td SHA256 $exe
+    if ($LASTEXITCODE -ne 0) { throw "Falha ao assinar $exe" }
+}
+Invoke-Sign $netMonitorExe
+Invoke-Sign $uninstallerExe
 
 # 5. Compilar o instalador nativo (NetMonitorSetup.exe)
 $installerExe = Join-Path $binDir "NetMonitorSetup.exe"
 $releaseSetup = Join-Path $releaseDir "NetMonitorSetup.exe"
 Write-Host "3. Compilando NetMonitorSetup.exe..." -ForegroundColor Cyan
-& $csc /nologo /target:winexe /optimize+ /platform:anycpu /win32icon:$iconPath /lib:$wpf `
-    /r:$wpfRefs,Microsoft.CSharp.dll `
+& $csc /nologo /target:winexe /optimize+ /platform:anycpu /win32icon:$iconPath /win32manifest:"$srcDir\app.manifest" /lib:$wpf `
+    /r:$wpfRefs `
     "/res:$netMonitorExe,NetMonitor.exe" "/res:$uninstallerExe,uninstall.exe" `
     "/res:$resDir\icone_128.png,icone_128.png" "/res:$resDir\wordmark_branca.png,wordmark_branca.png" `
     /out:$installerExe `
     "$srcDir\InstallerApp.cs" "$srcDir\Settings.cs" "$srcDir\Version.g.cs" "$srcDir\Icons.cs" "$srcDir\WpfKit.cs"
 if ($LASTEXITCODE -ne 0) { throw "Falha ao compilar NetMonitorSetup.exe" }
+Invoke-Sign $installerExe
 }
 Copy-Item -Path $installerExe -Destination $releaseSetup -Force
 
@@ -103,7 +117,7 @@ if (Test-Path $readmeFile) {
 $readmeContent = @"
 ==============================================================================
 NetMonitor v$version - Versão Portátil
-Autor: Eduardo Noé (Noé VFX) - https://noevfx.com
+Autor: Noé VFX - https://noevfx.com
 ==============================================================================
 
 [PT-BR]

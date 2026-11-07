@@ -1,0 +1,5 @@
+# Perfil desta pasta: code
+
+- Perfil: `D:\.IA agents\perfis\code\PERFIL.md`. Leia este (e o licoes.md que ele indicar); manuais e subarquivos so sob demanda.
+- Regras universais (curtas): `D:\.IA agents\global\AGENTS.md`
+- Nao leia `_arquivo`, `_Arquivo`, `_backups`, `release`.

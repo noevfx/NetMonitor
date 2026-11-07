@@ -1,4 +1,4 @@
-﻿# ==============================================================================
+# ==============================================================================
 # NetMonitor - Script de Instalação Oficial no Windows 11
 # ==============================================================================
 
@@ -8,7 +8,7 @@ $projectRoot = Split-Path $PSScriptRoot -Parent
 $binExe = Join-Path $projectRoot "bin\NetMonitor.exe"
 $uninstallerBin = Join-Path $projectRoot "bin\uninstall.exe"
 
-if (-not (Test-Path $binExe) -or -not (Test-Path $uninstallerBin)) {
+if ($true) {
     Write-Host "Compilando binários mais recentes..." -ForegroundColor Cyan
     & (Join-Path $PSScriptRoot "build.ps1")
 }
@@ -49,8 +49,9 @@ if (-not (Test-Path $uninstallReg)) {
     New-Item -Path $uninstallReg -Force | Out-Null
 }
 Set-ItemProperty -Path $uninstallReg -Name "DisplayName" -Value "NetMonitor (Monitor de Rede)"
-Set-ItemProperty -Path $uninstallReg -Name "DisplayVersion" -Value "1.0.0"
-Set-ItemProperty -Path $uninstallReg -Name "Publisher" -Value "Eduardo Noé"
+$v = if (Test-Path (Join-Path $projectRoot "version.txt")) { (Get-Content (Join-Path $projectRoot "version.txt") -Raw).Trim() } else { "1.0.0" }
+Set-ItemProperty -Path $uninstallReg -Name "DisplayVersion" -Value $v
+Set-ItemProperty -Path $uninstallReg -Name "Publisher" -Value "Noé VFX"
 Set-ItemProperty -Path $uninstallReg -Name "InstallLocation" -Value $installDir
 Set-ItemProperty -Path $uninstallReg -Name "DisplayIcon" -Value "$targetExe,0"
 Set-ItemProperty -Path $uninstallReg -Name "UninstallString" -Value "`"$targetUninstall`""
@@ -105,10 +106,8 @@ Remove-ItemProperty -Path $appReg -Name "CustomY" -ErrorAction SilentlyContinue
 
 Write-Host "Padrões de fábrica calibrados (Ace Obsidian, 3 colunas, transparente)." -ForegroundColor Green
 
-# 4. Iniciar o programa
+# 4. Iniciar o programa (sem WMI)
 try {
-    Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{ CommandLine = $targetExe } | Out-Null
-} catch {
-    Start-Process -FilePath $targetExe
-}
-Write-Host "`nNetMonitor v1.0.0 instalado e iniciado com sucesso!" -ForegroundColor Green
+    Start-Process -FilePath $targetExe -WorkingDirectory (Split-Path $targetExe)
+} catch { }
+Write-Host "`nNetMonitor v$v instalado e iniciado com sucesso!" -ForegroundColor Green

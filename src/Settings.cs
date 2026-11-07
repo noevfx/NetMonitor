@@ -5,6 +5,7 @@
 // ==============================================================================
 
 using System;
+using System.Collections.Generic;
 using System.Globalization;
 using Microsoft.Win32;
 
@@ -63,25 +64,49 @@ namespace NetMonitor
 
         const string DarkBar = "#202020", LightBar = "#F3F3F3";
 
+        // Caches de cor: Resolve roda FitContrast (até 100 iterações com Math.Pow) e pode ler o registro.
+        static readonly Dictionary<string, string> resolved = new Dictionary<string, string>();
+        static string accentHex;
+        static DateTime accentAt = DateTime.MinValue;
+
+        public static void ClearCache()
+        {
+            resolved.Clear();
+            accentHex = null;
+            accentAt = DateTime.MinValue;
+        }
+
         // Cor final de um preset para o tema: up = upload, down = download
         public static string Resolve(string key, bool up, bool dark)
         {
+            string ck = key + "|" + (up ? "u" : "d") + "|" + (dark ? "d" : "l");
+            string hit;
+            if (resolved.TryGetValue(ck, out hit)) return hit;
+
             ColorPreset p = Find(key);
-            if (p.Key == "pure_mono") return dark ? "#FFFFFF" : "#000000";
-            if (!dark && p.LightUp != null) return up ? p.LightUp : p.LightDown;
-            string baseHex = up ? p.DarkUp : p.DarkDown;
-            if (p.Key == "accent")
+            string result;
+            if (p.Key == "pure_mono") result = dark ? "#FFFFFF" : "#000000";
+            else if (!dark && p.LightUp != null) result = up ? p.LightUp : p.LightDown;
+            else
             {
-                // upload = destaque; download = mesmo matiz, mais claro e menos saturado (tons do próprio destaque)
-                string acc = WindowsAccent();
-                baseHex = up ? acc : Tint(acc, 0.45);
+                string baseHex = up ? p.DarkUp : p.DarkDown;
+                if (p.Key == "accent")
+                {
+                    // upload = destaque; download = mesmo matiz, mais claro e menos saturado (tons do próprio destaque)
+                    string acc = WindowsAccent();
+                    baseHex = up ? acc : Tint(acc, 0.45);
+                }
+                double min = p.Vivid ? 4.5 : (dark ? 6.0 : 5.0);
+                result = dark ? FitContrast(baseHex, DarkBar, min, true) : FitContrast(baseHex, LightBar, min, false);
             }
-            double min = p.Vivid ? 4.5 : (dark ? 6.0 : 5.0);
-            return dark ? FitContrast(baseHex, DarkBar, min, true) : FitContrast(baseHex, LightBar, min, false);
+            resolved[ck] = result;
+            return result;
         }
 
         public static string WindowsAccent()
         {
+            if (accentHex != null && (DateTime.UtcNow - accentAt).TotalSeconds < 30) return accentHex;
+            string value = "#0078D4";
             try
             {
                 using (RegistryKey k = Registry.CurrentUser.OpenSubKey(@"Software\Microsoft\Windows\DWM"))
@@ -91,12 +116,14 @@ namespace NetMonitor
                     {
                         uint abgr = unchecked((uint)Convert.ToInt32(v));
                         int r = (int)(abgr & 0xFF), g = (int)((abgr >> 8) & 0xFF), b = (int)((abgr >> 16) & 0xFF);
-                        return string.Format("#{0:X2}{1:X2}{2:X2}", r, g, b);
+                        value = string.Format("#{0:X2}{1:X2}{2:X2}", r, g, b);
                     }
                 }
             }
             catch { }
-            return "#0078D4";
+            accentHex = value;
+            accentAt = DateTime.UtcNow;
+            return value;
         }
 
         // ---------------------------------------------------------------- matemática de cor

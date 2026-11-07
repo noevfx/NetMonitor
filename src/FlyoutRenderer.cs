@@ -194,6 +194,33 @@ namespace NetMonitor
             catch { return new Font("Segoe UI", px, st, GraphicsUnit.Pixel); }
         }
 
+        [ThreadStatic] static Dictionary<string, Font> fontCache;
+
+        // Fontes do flyout eram criadas e destruídas a cada redesenho (10 por frame). Cache por thread.
+        static Font CachedFont(string fam, float px, FontStyle st)
+        {
+            if (fontCache == null) fontCache = new Dictionary<string, Font>();
+            string key = fam + "|" + px.ToString("0.##") + "|" + (int)st;
+            Font f;
+            if (fontCache.TryGetValue(key, out f)) return f;
+            if (fontCache.Count >= 256) return F(fam, px, st);
+            f = F(fam, px, st);
+            fontCache[key] = f;
+            return f;
+        }
+
+        [ThreadStatic] static StringFormat typo;
+
+        static StringFormat Typo()
+        {
+            if (typo == null)
+            {
+                typo = (StringFormat)StringFormat.GenericTypographic.Clone();
+                typo.FormatFlags |= StringFormatFlags.NoWrap | StringFormatFlags.NoClip;
+            }
+            return typo;
+        }
+
         static GraphicsPath RR(RectangleF r, float rad)
         {
             GraphicsPath p = new GraphicsPath();
@@ -209,6 +236,13 @@ namespace NetMonitor
         // margin > 0 reserva uma borda transparente para a sombra (janela real). hover = índice da linha sob o mouse (-1 nenhum).
         // O cartão sempre reserva espaço para 5 linhas: a altura não muda conforme a atividade de rede.
         public static Bitmap Render(AppSettings s, bool dark, List<ProcessTrafficItem> items, double totUpBps, double totDnBps,
+            float dpi, int hover, int margin, out FlyoutHit hit)
+        {
+            return RenderTo(null, s, dark, items, totUpBps, totDnBps, dpi, hover, margin, out hit);
+        }
+
+        // reuse: bitmap devolvido por uma chamada anterior; reaproveitado se o tamanho bater.
+        public static Bitmap RenderTo(Bitmap reuse, AppSettings s, bool dark, List<ProcessTrafficItem> items, double totUpBps, double totDnBps,
             float dpi, int hover, int margin, out FlyoutHit hit)
         {
             float sc = dpi / 96f;
@@ -228,8 +262,10 @@ namespace NetMonitor
 
             int m = margin;
             int bw = (int)Math.Ceiling(W) + m * 2, bh = (int)Math.Ceiling(H) + m * 2;
-            Bitmap bmp = new Bitmap(bw, bh, PixelFormat.Format32bppPArgb);
-            bmp.SetResolution(dpi, dpi);
+            Bitmap bmp = (reuse != null && reuse.Width == bw && reuse.Height == bh)
+                ? reuse
+                : new Bitmap(bw, bh, PixelFormat.Format32bppPArgb);
+            if (!ReferenceEquals(bmp, reuse)) bmp.SetResolution(dpi, dpi);
             Color cText = WidgetRenderer.Hex(t.TextPri, 255);
             Color cSub = WidgetRenderer.Hex(t.TextSec, 255);
             Color cLine = dark ? Color.FromArgb(22, 255, 255, 255) : Color.FromArgb(22, 0, 0, 0);
@@ -237,19 +273,18 @@ namespace NetMonitor
             Color cTrack = dark ? Color.FromArgb(30, 255, 255, 255) : Color.FromArgb(24, 0, 0, 0);
             string famText = WidgetRenderer.FontInstalled("Segoe UI Variable Text") ? "Segoe UI Variable Text" : "Segoe UI";
 
+            Font fTitle = CachedFont(famText, 15 * sc, FontStyle.Bold);
+            Font fName = CachedFont(famText, 14 * sc, FontStyle.Bold);
+            Font fSub = CachedFont(famText, 12.5f * sc, FontStyle.Regular);
+            Font fVal = CachedFont(famText, 14f * sc, FontStyle.Bold);
+            Font fFoot = CachedFont(famText, 12.5f * sc, FontStyle.Regular);
+            Font fFootB = CachedFont(famText, 12.5f * sc, FontStyle.Bold);
+            Font fTog = CachedFont(famText, 12.5f * sc, FontStyle.Bold);
+            Font fRank = CachedFont(famText, 13f * sc, FontStyle.Bold);
+            Font fSym = CachedFont("Segoe UI Symbol", 11f * sc, FontStyle.Regular);
+            StringFormat tf = Typo();
             using (Graphics g = Graphics.FromImage(bmp))
-            using (StringFormat tf = (StringFormat)StringFormat.GenericTypographic.Clone())
-            using (Font fTitle = F(famText, 15 * sc, FontStyle.Bold))
-            using (Font fName = F(famText, 14 * sc, FontStyle.Bold))
-            using (Font fSub = F(famText, 12.5f * sc, FontStyle.Regular))
-            using (Font fVal = F(famText, 14f * sc, FontStyle.Bold))
-            using (Font fFoot = F(famText, 12.5f * sc, FontStyle.Regular))
-            using (Font fFootB = F(famText, 12.5f * sc, FontStyle.Bold))
-            using (Font fTog = F(famText, 12.5f * sc, FontStyle.Bold))
-            using (Font fRank = F(famText, 13f * sc, FontStyle.Bold))
-            using (Font fSym = F("Segoe UI Symbol", 11f * sc, FontStyle.Regular))
             {
-                tf.FormatFlags |= StringFormatFlags.NoWrap | StringFormatFlags.NoClip;
                 g.Clear(Color.Transparent);
                 g.SmoothingMode = SmoothingMode.AntiAlias;
                 g.PixelOffsetMode = PixelOffsetMode.Half;
@@ -281,16 +316,11 @@ namespace NetMonitor
                 string title = "Tráfego de Rede por App";
                 float titleRoom = tgX - pad - 10 * sc;
                 float tpx = 15 * sc;
-                Font fT = fTitle;
-                while (tpx > 11 * sc && g.MeasureString(title, fT, PointF.Empty, tf).Width > titleRoom)
-                {
+                while (tpx > 11 * sc && g.MeasureString(title, CachedFont(famText, tpx, FontStyle.Bold), PointF.Empty, tf).Width > titleRoom)
                     tpx -= 0.5f * sc;
-                    if (fT != fTitle) fT.Dispose();
-                    fT = F(famText, tpx, FontStyle.Bold);
-                }
+                Font fT = CachedFont(famText, tpx, FontStyle.Bold);
                 using (SolidBrush bt = new SolidBrush(cText))
                     g.DrawString(title, fT, bt, pad, y + (hdrH - fT.GetHeight(g)) / 2f, tf);
-                if (fT != fTitle) fT.Dispose();
 
                 using (GraphicsPath p = RR(new RectangleF(tgX, tgY, wS + wC + 6 * sc, tgH), 6 * sc))
                 using (SolidBrush b = new SolidBrush(dark ? Color.FromArgb(26, 255, 255, 255) : Color.FromArgb(18, 0, 0, 0)))
