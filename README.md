@@ -154,11 +154,11 @@ Get-FileHash .\NetMonitorSetup.exe -Algorithm SHA256
 | `NetMonitor.exe` | `c0c7f7a6eb0a49424b306874f508ae0952f905d78de58b8138e685b22dd06d29` | [relatório](https://www.virustotal.com/gui/file/c0c7f7a6eb0a49424b306874f508ae0952f905d78de58b8138e685b22dd06d29) |
 <!-- hashes:end -->
 
-**Resultado no VirusTotal em 06/11/2026 (v1.0.5):** `NetMonitorSetup.exe` **4/70** (CrowdStrike, Cylance, APEX e Trapmine) e `NetMonitor.exe` **2/71** (APEX e Trapmine). Não há detecção de família de malware: todos os alertas são de *machine learning* por falta de assinatura digital. Na 1.0.3 a própria Microsoft analisou o executável no portal de segurança (WDSI, submission `ff1b8e70-808d-45bf-8ccf-2ede834c4fad`) e atestou **No malware detected**; a 1.0.5 foi enviada à Microsoft em 06/11/2026 (submission `276f452b-5e63-4ad1-a770-050cc5b1a40c`) e aguarda análise.
+**Resultado no VirusTotal em 06/11/2026 (v1.0.5):** `NetMonitorSetup.exe` **4/70** (CrowdStrike, Cylance, APEX e Trapmine) e `NetMonitor.exe` **2/71** (APEX e Trapmine). Não há detecção de família de malware: todos os alertas são de *machine learning* por falta de assinatura digital. Na 1.0.3 a própria Microsoft analisou o executável no portal de segurança (WDSI, submission `ff1b8e70-808d-45bf-8ccf-2ede834c4fad`) e atestou **No malware detected**; a 1.0.5 também foi enviada à Microsoft em 06/11/2026 (submission `276f452b-5e63-4ad1-a770-050cc5b1a40c`) e o analista não encontrou detecção nem telemetria; o Defender com a definição 1.463.166.0 também não acusa o instalador.
 
 Todos os executáveis da Noé VFX Labs ficam na [coleção pública no VirusTotal](https://www.virustotal.com/gui/collection/4baaa336745245003c10c490999bab6c0e45ccbd5579ea716ce6b25407cacc65).
 
-Os hashes dos zips e os relatórios completos estão em [`docs/SECURITY_AND_HASHES_v1.0.5.md`](docs/SECURITY_AND_HASHES_v1.0.5.md). A auditoria técnica, o que foi corrigido e o que ainda depende de assinatura de código estão em [`docs/SECURITY_AUDIT_v1.0.4.md`](docs/SECURITY_AUDIT_v1.0.4.md).
+Os hashes dos zips e os relatórios completos estão em [`docs/SECURITY_AND_HASHES_v1.0.5.md`](docs/SECURITY_AND_HASHES_v1.0.5.md). A auditoria técnica, o que foi corrigido e o que ainda depende de assinatura de código estão em [`docs/SECURITY_AUDIT_v1.0.3.md`](docs/SECURITY_AUDIT_v1.0.3.md).
 
 > [!IMPORTANT]
 > A correção definitiva para SmartScreen e para os alertas de *machine learning* é a **assinatura Authenticode**. Até lá, o Windows pode exibir "Editor desconhecido". O `build.ps1` já assina automaticamente quando `NETMONITOR_SIGN_PFX` e `NETMONITOR_SIGN_PASSWORD` estão configurados.
